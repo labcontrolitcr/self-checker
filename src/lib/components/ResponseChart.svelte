@@ -27,6 +27,8 @@
   // Build annotation object from current config + result
   function buildAnnotations() {
     const { ref, tol_st, tol_os, t_obj, perturbation_start, perturbation_window } = config;
+    const exp_start = (config as any).experiment_start ?? 0;
+    const t_obj_abs = t_obj + exp_start;  // absolute time: offset by experiment start
     const hi_st = ref * (1 + tol_st);
     const lo_st = ref * (1 - tol_st);
     const hi_os = ref * (1 + tol_os);
@@ -59,7 +61,7 @@
         backgroundColor: 'rgba(239,68,68,0.07)', borderWidth: 0,
       },
       stDeadline: {
-        type: 'line', xMin: t_obj, xMax: t_obj,
+        type: 'line', xMin: t_obj_abs, xMax: t_obj_abs,
         borderColor: 'rgba(234,179,8,0.7)', borderWidth: 1.5, borderDash: [5, 4],
         label: { display: true, content: 'T_st', position: 'start', color: 'rgba(234,179,8,0.9)', font: { family: 'Courier New', size: 9 } }
       },
@@ -181,11 +183,12 @@
     });
   }
 
-  // Hot-update annotations when config (perturbation) or result changes
+  // Hot-update annotations when config (perturbation/experiment_start) or result changes
   // without rebuilding the whole chart
   $effect(() => {
     const _ps = config.perturbation_start;
     const _pw = config.perturbation_window;
+    const _es = (config as any).experiment_start;
     const _st = result.settling_time_actual;
     if (chart) {
       chart.options.plugins.annotation.annotations = buildAnnotations();

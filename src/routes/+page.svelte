@@ -12,8 +12,9 @@
   let rows           = $state<Record<string, number>[]>([]);
   let result         = $state<AnalysisResult | null>(null);
   let fileName       = $state<string>('');
-  let error          = $state<string>('');
+  let error          = $state<string>('');   // CSV-level error (no time col, too short, etc.)
 
+  let experimentStart    = $state<number>(0);
   let perturbationStart  = $state<number>(0);
   let perturbationWindow = $state<number>(0.3);
 
@@ -29,7 +30,6 @@
   let selectedControlCol = $state<string>('');
 
   // ── Time column regex ──────────────────────────────────────────────────────
-  // Matches: tiempo, Tiempo, TIEMPO, t, T, k, K (exact match only)
   const TIME_RE = /^(tiempo|t|k)$/i;
 
   function findTimeCol(headers: string[]): string | null {
@@ -37,34 +37,33 @@
   }
 
   // ── Derived ────────────────────────────────────────────────────────────────
-  const ready           = $derived(selectedPlant !== null && selectedDomain !== null && !showReusePrompt);
   const hasData         = $derived(rows.length > 0 && result !== null);
-  const showColSelector = $derived(csvHeaders !== null && fileName !== '');
+  const showColSelector = $derived(csvHeaders !== null && fileName !== '' && !error);
 
-  // ── Analysis runner — plain function, called explicitly, NEVER from $effect ─
+  // csvReady: file loaded, no error, and time col identified — unlocks domain step
+  const csvReady = $derived(
+    fileName !== '' && !error && selectedTimeCol !== '' && selectedControlCol !== ''
+  );
+
+  // ── Analysis runner — only called when domain is already set ───────────────
   function runAnalysis(timeCol: string, ctrlCol: string, csvText: string, plant: PlantConfig) {
-    console.log(`[SC] runAnalysis → time=${timeCol} ctrl=${ctrlCol}`);
     error = '';
     try {
-      const hdrs = csvHeaders;
       const cfg = {
         ...plant,
+        experiment_start: experimentStart,
         perturbation_start: perturbationStart,
         perturbation_window: perturbationWindow,
-        csv_cols: hdrs ?? plant.csv_cols,
+        csv_cols: csvHeaders ?? plant.csv_cols,
         time_col: timeCol,
         control_col: ctrlCol,
       };
       const parsed = parseCSV(csvText, cfg.csv_cols);
-      console.log(`[SC] parsed ${parsed.length} rows`);
       if (parsed.length < 10) throw new Error('Archivo muy corto o formato incorrecto.');
       rows = parsed;
       result = analyzeResponse(parsed, cfg);
-      console.log(`[SC] OK — score: ${result.final_score.toFixed(1)}`);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.log(`[SC] ERROR: ${msg}`);
-      error = msg;
+      error = e instanceof Error ? e.message : String(e);
       rows = []; result = null;
     }
   }
@@ -77,20 +76,27 @@
     selectedTimeCol = ''; selectedControlCol = '';
   }
 
-  // ── Plant / domain ─────────────────────────────────────────────────────────
+  function clearResults() {
+    rows = []; result = null;
+  }
+
+  // ── Plant select ───────────────────────────────────────────────────────────
   function handlePlantSelect(plant: PlantConfig) {
     selectedPlant = plant;
     perturbationStart  = plant.perturbation_start;
     perturbationWindow = plant.perturbation_window;
-    selectedDomain = null;
-    showReusePrompt = false;
-    pendingDomain = null;
+    experimentStart    = 0;
+    selectedDomain     = null;
+    showReusePrompt    = false;
+    pendingDomain      = null;
     clearAll();
   }
 
+  // ── Domain select ──────────────────────────────────────────────────────────
   function handleDomainSelect(domain: 'continuo' | 'discreto') {
-    if (cachedCSVText && selectedPlant && domain !== selectedDomain) {
-      pendingDomain = domain;
+    // If switching domain while data is loaded, ask to reuse
+    if (cachedCSVText && selectedPlant && domain !== selectedDomain && fileName) {
+      pendingDomain   = domain;
       showReusePrompt = true;
       return;
     }
@@ -98,41 +104,61 @@
   }
 
   function applyDomain(domain: 'continuo' | 'discreto', reuse = false) {
-    selectedDomain = domain;
+    selectedDomain  = domain;
     showReusePrompt = false;
-    pendingDomain = null;
+    pendingDomain   = null;
+
+    // Set experiment start from plant config for this domain
+    if (selectedPlant) {
+      experimentStart = selectedPlant.exp_start_t?.[domain] ?? 0;
+    }
 
     if (reuse && cachedCSVText && selectedPlant && selectedTimeCol && selectedControlCol) {
       fileName = cachedFileName;
+      // First analysis run after domain is chosen
+      runAnalysis(selectedTimeCol, selectedControlCol, cachedCSVText, selectedPlant);
+    } else if (!reuse && cachedCSVText && selectedPlant && selectedTimeCol && selectedControlCol) {
+      // Domain selected fresh (not switching) — run analysis
       runAnalysis(selectedTimeCol, selectedControlCol, cachedCSVText, selectedPlant);
     } else {
-      clearAll();
+      clearResults();
     }
   }
 
   function confirmReuse(reuse: boolean) {
     if (pendingDomain) applyDomain(pendingDomain, reuse);
+    else showReusePrompt = false;
+  }
+
+  // ── Experiment start change ────────────────────────────────────────────────
+  function handleExperimentStartChange(t: number) {
+    experimentStart = t;
+    if (selectedDomain && cachedCSVText && selectedPlant && selectedTimeCol && selectedControlCol) {
+      runAnalysis(selectedTimeCol, selectedControlCol, cachedCSVText, selectedPlant);
+    }
   }
 
   // ── Perturbation change ────────────────────────────────────────────────────
   function handlePerturbationChange(start: number, win: number) {
     perturbationStart  = start;
     perturbationWindow = win;
-    if (cachedCSVText && selectedPlant && selectedTimeCol && selectedControlCol) {
+    if (selectedDomain && cachedCSVText && selectedPlant && selectedTimeCol && selectedControlCol) {
       runAnalysis(selectedTimeCol, selectedControlCol, cachedCSVText, selectedPlant);
     }
   }
 
-  // ── File upload ────────────────────────────────────────────────────────────
+  // ── File upload — parse only, do NOT run analysis yet ─────────────────────
   async function handleFile(e: Event) {
     const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
+    const file  = input.files?.[0];
     input.value = '';
     if (!file || !selectedPlant) return;
 
+    // Reset everything except plant/domain
     rows = []; result = null; error = '';
     selectedTimeCol = ''; selectedControlCol = '';
     csvHeaders = null; headersMatch = false;
+    selectedDomain = null;   // reset domain so user re-picks after new file
 
     const text = await file.text();
     cachedCSVText  = text;
@@ -140,66 +166,56 @@
     fileName       = file.name;
 
     const headers = parseCSVHeaders(text);
-    console.log(`[SC] headers: ${headers ? headers.join(', ') : 'none'}`);
 
     if (!headers) {
-      // No header row — validate time col from plant config
+      // No header row — use plant config columns
       if (!TIME_RE.test(selectedPlant.time_col.trim())) {
-        error = `No encontré la columna de tiempo (tiempo, t, Tiempo, TIEMPO, k, K).`;
+        error = `No encontré la columna de tiempo (tiempo, t, k).`;
         return;
       }
-      csvHeaders = selectedPlant.csv_cols;
-      headersMatch = true;
+      csvHeaders         = selectedPlant.csv_cols;
+      headersMatch       = true;
       selectedTimeCol    = selectedPlant.time_col;
       selectedControlCol = selectedPlant.control_col;
-      runAnalysis(selectedTimeCol, selectedControlCol, text, selectedPlant);
+      // Don't run analysis — wait for domain
       return;
     }
 
     csvHeaders = headers;
 
-    // Find time column
     const timeCol = findTimeCol(headers);
     if (!timeCol) {
-      error = `No encontré la columna de tiempo (tiempo, t, Tiempo, TIEMPO, k, K). Columnas: ${headers.join(', ')}`;
-      console.log('[SC] ERROR: no time col');
+      error = `No encontré la columna de tiempo (tiempo, t, k). Columnas: ${headers.join(', ')}`;
       return;
     }
     selectedTimeCol = timeCol;
 
-    // Check if all expected cols are present
-    const expected = selectedPlant.csv_cols.map(c => c.toLowerCase());
-    const actual   = headers.map(h => h.toLowerCase());
-    headersMatch = expected.every(ex => actual.includes(ex));
-    console.log(`[SC] headersMatch=${headersMatch}`);
+    const expected   = selectedPlant.csv_cols.map(c => c.toLowerCase());
+    const actual     = headers.map(h => h.toLowerCase());
+    headersMatch     = expected.every(ex => actual.includes(ex));
 
     if (headersMatch) {
-      // Auto-select ctrl col and run immediately — exactly once
       const ctrlCol = headers.find(h => h.toLowerCase() === selectedPlant!.control_col.toLowerCase())
         ?? headers.find(h => h !== timeCol)
         ?? headers[0];
       selectedControlCol = ctrlCol;
-      runAnalysis(timeCol, ctrlCol, text, selectedPlant);
     } else {
-      // Mismatch — pre-select best guess but wait for user to click a ctrl button
+      // Mismatch — pre-select best guess, user can change
       selectedControlCol = headers.find(h => h !== timeCol) ?? headers[0];
-      console.log('[SC] waiting for user to select ctrl col');
     }
+    // Don't run analysis — wait for domain selection
   }
 
-  // ── Column button clicks — each runs analysis exactly once ────────────────
+  // ── Column button clicks ───────────────────────────────────────────────────
   function selectTimeCol(col: string) {
     selectedTimeCol = col;
-    console.log(`[SC] user → time col: ${col}`);
-    if (selectedControlCol && cachedCSVText && selectedPlant) {
-      runAnalysis(col, selectedControlCol, cachedCSVText, selectedPlant);
-    }
+    // Don't re-run — domain hasn't been picked yet at this stage
   }
 
   function selectControlCol(col: string) {
     selectedControlCol = col;
-    console.log(`[SC] user → ctrl col: ${col}`);
-    if (selectedTimeCol && cachedCSVText && selectedPlant) {
+    // If domain is already chosen (e.g. user changes col after analysis), re-run
+    if (selectedDomain && cachedCSVText && selectedPlant && selectedTimeCol) {
       runAnalysis(selectedTimeCol, col, cachedCSVText, selectedPlant);
     }
   }
@@ -216,17 +232,33 @@
     <PlantSelector
       {selectedPlant}
       {selectedDomain}
+      {experimentStart}
       {perturbationStart}
       {perturbationWindow}
+      {fileName}
+      csvColHint={selectedPlant ? selectedPlant.csv_cols.join(', ') : ''}
+      csvError={error}
+      {csvReady}
+      {showColSelector}
+      {csvHeaders}
+      {headersMatch}
+      {selectedTimeCol}
+      {selectedControlCol}
+      {hasData}
+      expStartWarning={result?.exp_start_warning ?? null}
       onPlantSelect={handlePlantSelect}
       onDomainSelect={handleDomainSelect}
+      onExperimentStartChange={handleExperimentStartChange}
       onPerturbationChange={handlePerturbationChange}
+      onFileChange={handleFile}
+      onTimeColSelect={selectTimeCol}
+      onControlColSelect={selectControlCol}
     />
 
     {#if showReusePrompt}
       <div class="reuse-prompt">
         <span class="reuse-msg">
-          Cambio de dominio. Usar el mismo archivo
+          Cambio de dominio. ¿Usar el mismo archivo
           <span class="reuse-filename">{cachedFileName}</span>?
         </span>
         <div class="reuse-btns">
@@ -235,73 +267,12 @@
         </div>
       </div>
     {/if}
-
-    {#if ready}
-      <div class="step">
-        <span class="step-label">3. ARCHIVO CSV</span>
-        <label class="upload-btn">
-          {fileName || 'Seleccionar archivo...'}
-          <input type="file" accept=".csv" onchange={handleFile} />
-        </label>
-        {#if !fileName && selectedPlant}
-          <span class="col-hint">esperado: {selectedPlant.csv_cols.join(', ')}</span>
-        {/if}
-      </div>
-
-      {#if showColSelector && csvHeaders && selectedPlant}
-        <div class="col-detection" class:mismatch={!headersMatch}>
-
-          {#if !headersMatch}
-            <div class="col-warning">
-              COLUMNAS NO RECONOCIDAS — esperado: {selectedPlant.csv_cols.join(', ')}
-            </div>
-          {/if}
-
-          <div class="col-selector-row">
-            <span class="col-selector-label">TIEMPO</span>
-            <div class="btn-row">
-              {#each csvHeaders as col}
-                <button
-                  class="col-btn"
-                  class:active={selectedTimeCol === col}
-                  onclick={() => selectTimeCol(col)}
-                >{col}</button>
-              {/each}
-            </div>
-          </div>
-
-          <div class="col-selector-row">
-            <span class="col-selector-label">COLUMNA</span>
-            <div class="btn-row">
-              {#each csvHeaders as col}
-                <button
-                  class="col-btn"
-                  class:active={selectedControlCol === col}
-                  onclick={() => selectControlCol(col)}
-                >{col}</button>
-              {/each}
-            </div>
-          </div>
-
-          <div class="semaphore-row">
-            <span class="semaphore" class:open={hasData}>
-              {hasData ? '● ANALIZADO' : '○ SELECCIONA COLUMNAS'}
-            </span>
-          </div>
-
-        </div>
-      {/if}
-    {/if}
-
   </section>
 
-  {#if error}
-    <div class="error-box">{error}</div>
-  {/if}
-
-{#if hasData && selectedDomain && result && selectedPlant}
+  {#if hasData && selectedDomain && result && selectedPlant}
     {@const cfg = {
       ...selectedPlant,
+      experiment_start: experimentStart,
       perturbation_start: perturbationStart,
       perturbation_window: perturbationWindow,
       csv_cols: csvHeaders ?? selectedPlant.csv_cols,
@@ -355,98 +326,6 @@
     border-radius: 6px;
   }
 
-  .step { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-
-  .step-label {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.7rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    color: var(--muted-foreground);
-    white-space: nowrap;
-    min-width: 5.5rem;
-  }
-
-  .upload-btn {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.75rem;
-    padding: 0.35rem 0.9rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    cursor: pointer;
-    transition: all 0.15s;
-    color: var(--foreground);
-  }
-  .upload-btn:hover { background: var(--accent); border-color: var(--foreground); }
-  .upload-btn input { display: none; }
-
-  .col-hint {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.65rem;
-    color: var(--muted-foreground);
-  }
-
-  .col-detection {
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-    padding: 0.7rem 0.9rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--accent, #141414);
-  }
-
-  .col-detection.mismatch {
-    border-color: rgba(239, 68, 68, 0.45);
-    background: rgba(239, 68, 68, 0.05);
-  }
-
-  .col-warning {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.63rem;
-    color: rgba(239, 68, 68, 0.9);
-    font-weight: 600;
-    padding-bottom: 0.4rem;
-    border-bottom: 1px solid rgba(239, 68, 68, 0.2);
-  }
-
-  .col-selector-row { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; }
-
-  .col-selector-label {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.65rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    color: var(--muted-foreground);
-    white-space: nowrap;
-    min-width: 4.5rem;
-  }
-
-  .btn-row { display: flex; gap: 0.4rem; flex-wrap: wrap; }
-
-  .col-btn {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.7rem;
-    padding: 0.25rem 0.7rem;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--background);
-    color: var(--muted-foreground);
-    cursor: pointer;
-    transition: all 0.12s ease;
-  }
-  .col-btn:hover { border-color: var(--foreground); color: var(--foreground); }
-  .col-btn.active { background: var(--foreground); color: var(--background); border-color: var(--foreground); }
-
-  .semaphore-row { padding-top: 0.2rem; border-top: 1px solid var(--border); }
-  .semaphore {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.6rem;
-    letter-spacing: 0.08em;
-    color: var(--muted-foreground);
-  }
-  .semaphore.open { color: #4ade80; }
-
   .reuse-prompt {
     display: flex;
     align-items: center;
@@ -477,20 +356,9 @@
   .sel-btn:hover { background: var(--accent); border-color: var(--foreground); }
   .sel-btn.active { background: var(--foreground); color: var(--background); }
 
-  .error-box {
-    font-family: 'Courier New', Courier, monospace;
-    font-size: 0.72rem;
-    color: #f87171;
-    border: 1px solid rgba(248,113,113,0.5);
-    border-radius: 4px;
-    padding: 0.5rem 0.8rem;
-  }
-
   .results-section {
     display: flex;
     flex-direction: column;
     gap: 1.2rem;
   }
-
-
 </style>

@@ -36,6 +36,7 @@ export interface PlantConfig {
 
   y_limits: [number, number] | null;  // Y axis [min, max], null = auto
   domains: ('continuo' | 'discreto')[];
+  exp_start_t: Partial<Record<'continuo' | 'discreto', number>>;  // experiment start time per domain (default 0)
 }
 
 export const plants: PlantConfig[] = [
@@ -59,6 +60,7 @@ export const plants: PlantConfig[] = [
     weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
     y_limits: [3.8, 4.2],
     domains: ['continuo', 'discreto'],
+    exp_start_t: { continuo: 0, discreto: 1 },
   },
   {
     id: 'grua',
@@ -80,6 +82,7 @@ export const plants: PlantConfig[] = [
     weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
     y_limits: null,
     domains: ['continuo', 'discreto'],
+    exp_start_t: {},
   },
   {
     id: 'pamh',
@@ -101,6 +104,7 @@ export const plants: PlantConfig[] = [
     weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
     y_limits: null,
     domains: ['continuo'],
+    exp_start_t: {},
   },
   {
     id: 'heli_2dof',
@@ -122,5 +126,6 @@ export const plants: PlantConfig[] = [
     weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
     y_limits: null,
     domains: ['continuo', 'discreto'],
+    exp_start_t: {},
   },
 ];

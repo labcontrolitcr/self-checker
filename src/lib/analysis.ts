@@ -44,6 +44,9 @@ export interface AnalysisResult {
 
   // Rise time: first crossing of reference from below
   rise_time: number | null;
+
+  // Experiment start validation
+  exp_start_warning: string | null;   // null = ok, string = warning message
 }
 
 /**
@@ -138,18 +141,51 @@ function nearestIdx(time: number[], t: number): number {
  */
 export function analyzeResponse(
   rows: Record<string, number>[],
-  config: PlantConfig
+  config: PlantConfig & { experiment_start?: number }
 ): AnalysisResult {
   const {
     time_col, control_col,
     ref, tol_st, t_obj, t_win, tol_os, ess_tol, ess_k_win,
     perturbation_start, perturbation_window, pert_recovery_k_win,
     weights,
+    experiment_start = 0,
   } = config;
 
-  const time = rows.map(r => r[time_col]);
-  const vel  = rows.map(r => r[control_col]);
+  // Trim rows to experiment window: only samples at or after experiment_start
+  const trimmed = experiment_start > 0
+    ? rows.filter(r => r[time_col] >= experiment_start)
+    : rows;
+
+  const time = trimmed.map(r => r[time_col]);
+  const vel  = trimmed.map(r => r[control_col]);
   const n    = vel.length;
+
+  // ── Experiment start validation ────────────────────────────────────────────
+  // Look at the 10 samples BEFORE experiment_start in the original (untrimmed) rows.
+  // They must be near zero (< 5% of ref), confirming the system was at rest before
+  // the experiment began. If experiment_start=0 or there aren't enough prior samples,
+  // fall back to the first 10 trimmed samples.
+  const EXP_START_WIN = 10;
+  const EXP_START_TOL = 0.05;   // 5% of ref
+
+  let preSlice: number[];
+  if (experiment_start > 0) {
+    // Find the index in the original rows just before experiment_start
+    const preRows = rows.filter(r => r[time_col] < experiment_start);
+    const preSig  = preRows.map(r => r[control_col]);
+    preSlice = preSig.slice(Math.max(0, preSig.length - EXP_START_WIN));
+  } else {
+    // No prior data — use the first 10 trimmed samples
+    preSlice = vel.slice(0, Math.min(EXP_START_WIN, n));
+  }
+
+  const initMean      = preSlice.length > 0
+    ? preSlice.reduce((a, b) => a + b, 0) / preSlice.length
+    : 0;
+  const initErr_pct   = Math.abs(initMean) / ref * 100;
+  const exp_start_warning: string | null = initErr_pct > EXP_START_TOL * 100
+    ? `Inicio de experimento inválido: las ${preSlice.length} muestras anteriores al inicio promedian ${initMean.toFixed(4)} (${initErr_pct.toFixed(1)}% de la referencia). Asegúrese de que el punto de inicio esté en reposo (< ${(EXP_START_TOL * 100).toFixed(0)}% de la referencia).`
+    : null;
 
   const st_lo = ref * (1 - tol_st);
   const st_hi = ref * (1 + tol_st);
@@ -254,5 +290,6 @@ export function analyzeResponse(
     Pert_score, Pert_comment, Pert_err_pct,
     final_score,
     rise_time,
+    exp_start_warning,
   };
 }
