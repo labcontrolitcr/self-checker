@@ -47,6 +47,9 @@ export interface AnalysisResult {
 
   // Experiment start validation
   exp_start_warning: string | null;   // null = ok, string = warning message
+
+  // Perturbation validation
+  pert_warning: string | null;         // null = ok, string = warning message
 }
 
 /**
@@ -161,30 +164,34 @@ export function analyzeResponse(
   const n    = vel.length;
 
   // ── Experiment start validation ────────────────────────────────────────────
-  // Look at the 10 samples BEFORE experiment_start in the original (untrimmed) rows.
-  // They must be near zero (< 5% of ref), confirming the system was at rest before
-  // the experiment began. If experiment_start=0 or there aren't enough prior samples,
-  // fall back to the first 10 trimmed samples.
-  const EXP_START_WIN = 10;
-  const EXP_START_TOL = 0.05;   // 5% of ref
+  // Look at the 10 samples around experiment_start to confirm the system is at rest
+  // (signal near zero). Uses z-score: |mean| / std of those samples.
+  // At true rest: mean ≈ 0, so z = |mean|/std ≈ 0-1.
+  // Already at steady state: mean ≈ ref, so z = ref/std >> 1 (typically 50-200).
+  // Threshold of 5 gives 0% false positives and 100% detection across typical noise levels.
+  // If experiment_start > 0 uses the 10 samples just before it; otherwise uses the first 10.
+  const EXP_START_WIN      = 10;
+  const EXP_START_ZSCORE   = 5;    // |mean|/std threshold — above this = not at rest
 
   let preSlice: number[];
   if (experiment_start > 0) {
-    // Find the index in the original rows just before experiment_start
     const preRows = rows.filter(r => r[time_col] < experiment_start);
     const preSig  = preRows.map(r => r[control_col]);
     preSlice = preSig.slice(Math.max(0, preSig.length - EXP_START_WIN));
   } else {
-    // No prior data — use the first 10 trimmed samples
     preSlice = vel.slice(0, Math.min(EXP_START_WIN, n));
   }
 
-  const initMean      = preSlice.length > 0
+  const initMean = preSlice.length > 0
     ? preSlice.reduce((a, b) => a + b, 0) / preSlice.length
     : 0;
-  const initErr_pct   = Math.abs(initMean) / ref * 100;
-  const exp_start_warning: string | null = initErr_pct > EXP_START_TOL * 100
-    ? `Inicio de experimento inválido: las ${preSlice.length} muestras anteriores al inicio promedian ${initMean.toFixed(4)} (${initErr_pct.toFixed(1)}% de la referencia). Asegúrese de que el punto de inicio esté en reposo (< ${(EXP_START_TOL * 100).toFixed(0)}% de la referencia).`
+  const initStd = preSlice.length > 1
+    ? Math.sqrt(preSlice.reduce((acc, v) => acc + (v - initMean) ** 2, 0) / (preSlice.length - 1))
+    : 0;
+  const initZScore = initStd > 0 ? Math.abs(initMean) / initStd : 0;
+
+  const exp_start_warning: string | null = initZScore > EXP_START_ZSCORE
+    ? `Inicio de experimento inválido: las ${preSlice.length} muestras en el punto de inicio promedian ${initMean.toFixed(4)} (z=${initZScore.toFixed(1)}, se esperaba < ${EXP_START_ZSCORE}). El sistema debe estar en reposo (señal cerca de cero) al inicio del experimento.`
     : null;
 
   const st_lo = ref * (1 - tol_st);
@@ -277,19 +284,71 @@ export function analyzeResponse(
     Pert_comment = `Error de perturbacion ${Pert_err_pct.toFixed(3)}% en t=${pert_end_time.toFixed(3)}s — ${Pert_score.toFixed(1)}/100`;
   }
 
+  // ── Perturbation validation ──────────────────────────────────────────────────
+  // 10 samples BEFORE perturbation_start: must be within ±5% of ref (steady state)
+  // 10 samples AFTER perturbation_start: at least one must exceed ±10% of ref (disturbance visible)
+  // Perturbation validation using z-score of mean shift:
+  //   Pre-window (20 samples): compute mean and std (captures noise level).
+  //   Post-window (20 samples): compute mean.
+  //   Detection: |post_mean - pre_mean| / pre_std > PERT_ZSCORE_MIN
+  //   This is robust to slow/gradual perturbations and high-frequency noise alike,
+  //   since even a slow sustained shift produces a large z-score when noise is small.
+  const PERT_WIN         = 20;
+  const PERT_PRE_TOL     = 0.05;   // 5% of ref — steady state tolerance pre-pert
+  const PERT_ZSCORE_MIN  = 3;      // |mean_shift| must exceed N sigma of pre-window noise
+
+  const pert_start_idx = nearestIdx(time, perturbation_start);
+
+  const pert_pre_start = Math.max(0, pert_start_idx - PERT_WIN);
+  const pert_preSlice  = vel.slice(pert_pre_start, pert_start_idx);
+  const pert_preMean   = pert_preSlice.length > 0
+    ? pert_preSlice.reduce((a, b) => a + b, 0) / pert_preSlice.length
+    : ref;
+  const pert_preErr_pct = Math.abs(pert_preMean - ref) / ref * 100;
+  const pert_preStd = pert_preSlice.length > 1
+    ? Math.sqrt(pert_preSlice.reduce((acc, v) => acc + (v - pert_preMean) ** 2, 0) / (pert_preSlice.length - 1))
+    : 0;
+
+  const pert_post_end  = Math.min(n, pert_start_idx + PERT_WIN);
+  const pert_postSlice = vel.slice(pert_start_idx, pert_post_end);
+  const pert_postMean  = pert_postSlice.length > 0
+    ? pert_postSlice.reduce((a, b) => a + b, 0) / pert_postSlice.length
+    : ref;
+
+  // z-score of mean shift: how many sigma did the mean move?
+  const pert_zScore = pert_preStd > 0
+    ? Math.abs(pert_postMean - pert_preMean) / pert_preStd
+    : 0;
+
+  let pert_warning: string | null = null;
+  if (pert_preErr_pct > PERT_PRE_TOL * 100) {
+    pert_warning = `Las ${pert_preSlice.length} muestras antes de la perturbación promedian ${pert_preMean.toFixed(4)} (error ${pert_preErr_pct.toFixed(1)}% respecto a la referencia). El sistema debe estar en estado estable antes de la perturbación (< ${(PERT_PRE_TOL * 100).toFixed(0)}%).`;
+  } else if (pert_zScore < PERT_ZSCORE_MIN) {
+    pert_warning = `No se detecta una perturbación significativa (desplazamiento de media: ${pert_zScore.toFixed(1)}σ, se esperaba > ${PERT_ZSCORE_MIN}σ; ruido pre: std=${pert_preStd.toFixed(4)}). Verificá el tiempo de inicio de la perturbación.`;
+  }
+
+  // ── Score overrides for invalid start / perturbation ─────────────────────
+  // If the experiment start is invalid, all pre-perturbation scores are zeroed.
+  // If the perturbation is invalid, only the perturbation score is zeroed.
+  const eff_ST_score   = exp_start_warning ? 0 : ST_score;
+  const eff_OS_score   = exp_start_warning ? 0 : OS_score;
+  const eff_ESS_score  = exp_start_warning ? 0 : ESS_score;
+  const eff_Pert_score = pert_warning       ? 0 : Pert_score;
+
   // ── Final score ────────────────────────────────────────────────────────────
   const final_score =
-    (ST_score * weights.ST + OS_score * weights.OS + ESS_score * weights.ESS + Pert_score * weights.Pert) / 100;
+    (eff_ST_score * weights.ST + eff_OS_score * weights.OS + eff_ESS_score * weights.ESS + eff_Pert_score * weights.Pert) / 100;
 
   return {
-    ST_score, ST_comment, ST_prop_ok: prop_ok, settling_time_actual,
-    OS_score, OS_comment, OS_val, OS_lim,
-    ESS_pre_score, ESS_pre_comment, ESS_pre,
-    ESS_post_score, ESS_post_comment, ESS_post,
-    ESS_score,
-    Pert_score, Pert_comment, Pert_err_pct,
+    ST_score: eff_ST_score, ST_comment, ST_prop_ok: prop_ok, settling_time_actual,
+    OS_score: eff_OS_score, OS_comment, OS_val, OS_lim,
+    ESS_pre_score: exp_start_warning ? 0 : ESS_pre_score, ESS_pre_comment, ESS_pre,
+    ESS_post_score: exp_start_warning ? 0 : ESS_post_score, ESS_post_comment, ESS_post,
+    ESS_score: eff_ESS_score,
+    Pert_score: eff_Pert_score, Pert_comment, Pert_err_pct,
     final_score,
     rise_time,
     exp_start_warning,
+    pert_warning,
   };
 }

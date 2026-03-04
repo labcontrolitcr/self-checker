@@ -19,6 +19,7 @@
     selectedControlCol: string;
     hasData: boolean;
     expStartWarning: string | null;
+    pertWarning: string | null;
     onPlantSelect: (plant: PlantConfig) => void;
     onDomainSelect: (domain: 'continuo' | 'discreto') => void;
     onExperimentStartChange: (t: number) => void;
@@ -45,6 +46,7 @@
     selectedControlCol,
     hasData,
     expStartWarning,
+    pertWarning,
     onPlantSelect,
     onDomainSelect,
     onExperimentStartChange,
@@ -227,6 +229,10 @@
         </div>
 
         <!-- Semaphore — only visible once domain is selected -->
+        {#if pertWarning}
+          <div class="exp-start-warning">{pertWarning}</div>
+        {/if}
+
         <div class="semaphore-row">
           <span class="semaphore" class:open={hasData}>
             {hasData ? '● ANALIZADO' : '○ PROCESANDO...'}

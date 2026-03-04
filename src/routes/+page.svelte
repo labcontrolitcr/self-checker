@@ -21,8 +21,9 @@
   let cachedCSVText  = $state<string>('');
   let cachedFileName = $state<string>('');
 
-  let showReusePrompt = $state(false);
-  let pendingDomain   = $state<'continuo' | 'discreto' | null>(null);
+  let showReusePrompt    = $state(false);
+  let pendingDomain      = $state<'continuo' | 'discreto' | null>(null);
+  let domainEverSelected = $state(false);  // true once user has picked a domain at least once
 
   let csvHeaders         = $state<string[] | null>(null);
   let headersMatch       = $state(false);
@@ -82,20 +83,21 @@
 
   // ── Plant select ───────────────────────────────────────────────────────────
   function handlePlantSelect(plant: PlantConfig) {
-    selectedPlant = plant;
+    selectedPlant      = plant;
     perturbationStart  = plant.perturbation_start;
     perturbationWindow = plant.perturbation_window;
     experimentStart    = 0;
     selectedDomain     = null;
     showReusePrompt    = false;
     pendingDomain      = null;
+    domainEverSelected = false;
     clearAll();
   }
 
   // ── Domain select ──────────────────────────────────────────────────────────
   function handleDomainSelect(domain: 'continuo' | 'discreto') {
-    // If switching domain while data is loaded, ask to reuse
-    if (cachedCSVText && selectedPlant && domain !== selectedDomain && fileName) {
+    // Only show reuse prompt when switching domains after having already chosen one
+    if (domainEverSelected && cachedCSVText && selectedPlant && domain !== selectedDomain && fileName) {
       pendingDomain   = domain;
       showReusePrompt = true;
       return;
@@ -104,9 +106,10 @@
   }
 
   function applyDomain(domain: 'continuo' | 'discreto', reuse = false) {
-    selectedDomain  = domain;
-    showReusePrompt = false;
-    pendingDomain   = null;
+    selectedDomain     = domain;
+    domainEverSelected = true;
+    showReusePrompt    = false;
+    pendingDomain      = null;
 
     // Set experiment start from plant config for this domain
     if (selectedPlant) {
@@ -154,11 +157,12 @@
     input.value = '';
     if (!file || !selectedPlant) return;
 
-    // Reset everything except plant/domain
+    // Reset everything except plant
     rows = []; result = null; error = '';
     selectedTimeCol = ''; selectedControlCol = '';
     csvHeaders = null; headersMatch = false;
-    selectedDomain = null;   // reset domain so user re-picks after new file
+    selectedDomain     = null;   // reset domain so user re-picks after new file
+    domainEverSelected = false;
 
     const text = await file.text();
     cachedCSVText  = text;
@@ -246,6 +250,7 @@
       {selectedControlCol}
       {hasData}
       expStartWarning={result?.exp_start_warning ?? null}
+      pertWarning={result?.pert_warning ?? null}
       onPlantSelect={handlePlantSelect}
       onDomainSelect={handleDomainSelect}
       onExperimentStartChange={handleExperimentStartChange}
