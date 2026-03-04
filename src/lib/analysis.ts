@@ -13,7 +13,7 @@ export interface AnalysisResult {
   ST_score: number;
   ST_comment: string;
   ST_prop_ok: number;            // fraction 0-1 of samples in band during [t_obj, t_obj+t_win]
-  settling_time_actual: number | null;  // first time signal enters and stays in band
+  settling_time_actual: number | null;  // first time signal enters the band (before perturbation)
 
   // Overshoot
   OS_score: number;
@@ -21,15 +21,15 @@ export interface AnalysisResult {
   OS_val: number;
   OS_lim: number;
 
-  // ESS — pre-perturbation (evaluated at settling time or t_obj if not found)
+  // ESS pre-perturbation (window ending just before perturbation_start)
   ESS_pre_score: number;
   ESS_pre_comment: string;
-  ESS_pre: ESSWindow;
+  ESS_pre: { center_time: number; mean: number; error_pct: number; k_start: number; k_end: number };
 
-  // ESS — post-perturbation (evaluated at perturbation_start + perturbation_window)
+  // ESS post-perturbation (window starting at perturbation_start + perturbation_window)
   ESS_post_score: number;
   ESS_post_comment: string;
-  ESS_post: ESSWindow;
+  ESS_post: { center_time: number; mean: number; error_pct: number; k_start: number; k_end: number };
 
   // Combined ESS score (mean of pre and post)
   ESS_score: number;
@@ -211,15 +211,27 @@ export function analyzeResponse(
   const ST_score   = 100 * prop_ok;
   const ST_comment = `${(prop_ok*100).toFixed(0)}% de muestras en banda [${st_lo.toFixed(3)}, ${st_hi.toFixed(3)}] en [${t_obj}s, ${(t_obj+t_win).toFixed(1)}s] — ${ST_score.toFixed(1)}/100`;
 
-  // Actual settling time — first index where signal stays in band until end
+  // Actual settling time — first sample inside the ±tol_st band, restricted to
+  // [0, perturbation_start) so post-perturbation recovery never counts.
+  // Mirrors the MATLAB script logic: score = fraction of samples in band within
+  // [t_obj, t_obj+t_win]. The T_st marker is purely informational.
+  // Fallback: if never in band before perturbation, use the sample just before it.
+  const pert_start_for_st = nearestIdx(time, perturbation_start);
+
   let settling_time_actual: number | null = null;
   let settling_idx: number | null = null;
-  for (let i = 0; i < n; i++) {
-    if (vel.slice(i).every(v => v >= st_lo && v <= st_hi)) {
+
+  for (let i = 0; i < pert_start_for_st; i++) {
+    if (vel[i] >= st_lo && vel[i] <= st_hi) {
       settling_time_actual = time[i];
       settling_idx = i;
       break;
     }
+  }
+
+  // Fallback: signal never entered band before perturbation
+  if (settling_idx === null) {
+    settling_idx = Math.max(0, pert_start_for_st - 1);
   }
 
   // ── Rise time ──────────────────────────────────────────────────────────────
@@ -249,39 +261,63 @@ export function analyzeResponse(
     OS_comment = `Overshoot ${exceso.toFixed(2)}% sobre limite (${OS_val.toFixed(4)} > ${OS_lim.toFixed(4)}) — ${OS_score.toFixed(1)}/100`;
   }
 
-  // ── ESS pre-perturbation ───────────────────────────────────────────────────
-  // Center: actual settling time if found, otherwise nearest sample to t_obj
-  const ess_pre_center_idx = settling_idx !== null
-    ? settling_idx
-    : nearestIdx(time, t_obj);
+  // ── ESS pre-perturbation ─────────────────────────────────────────────────
+  // Window of ess_k_win samples ending just before perturbation_start.
+  // Guarantees steady-state measurement, never the transient.
+  const ess_pre_end_i   = Math.max(0, pert_start_for_st - 1);
+  const ess_pre_start_i = Math.max(0, ess_pre_end_i - ess_k_win + 1);
+  const ess_pre_slice   = vel.slice(ess_pre_start_i, ess_pre_end_i + 1);
+  const ess_pre_mean    = ess_pre_slice.length > 0
+    ? ess_pre_slice.reduce((a, b) => a + b, 0) / ess_pre_slice.length : ref;
+  const ess_pre_err     = Math.abs(ess_pre_mean - ref) / ref * 100;
+  const ess_tol_pct     = ess_tol * 100;
+  const ESS_pre         = { center_time: time[ess_pre_end_i], mean: ess_pre_mean, error_pct: ess_pre_err, k_start: ess_pre_start_i, k_end: ess_pre_end_i };
 
-  const ESS_pre = windowedMean(vel, time, ess_pre_center_idx, ess_k_win);
-  const { score: ESS_pre_score, comment: ESS_pre_comment } = scoreESS(ESS_pre, ref, ess_tol);
+  let ESS_pre_score: number, ESS_pre_comment: string;
+  if (ess_pre_err <= ess_tol_pct) {
+    ESS_pre_score   = 100;
+    ESS_pre_comment = `ESS ${ess_pre_err.toFixed(3)}% dentro del rango (tol ${ess_tol_pct.toFixed(1)}%) — 100/100`;
+  } else {
+    const pre_over   = ess_pre_err - ess_tol_pct;
+    ESS_pre_score    = Math.max(0, 100 - pre_over * 20);
+    ESS_pre_comment  = `ESS ${ess_pre_err.toFixed(3)}% fuera del rango (tol ${ess_tol_pct.toFixed(1)}%, exceso ${pre_over.toFixed(3)}%) — ${ESS_pre_score.toFixed(1)}/100`;
+  }
 
-  // ── ESS post-perturbation ──────────────────────────────────────────────────
-  // Center: nearest sample to perturbation_start + perturbation_window
-  // (i.e. right when the disturbance ends and recovery should be complete)
-  const pert_end_time      = perturbation_start + perturbation_window;
-  const ess_post_center_idx = nearestIdx(time, pert_end_time);
+  // ── ESS post-perturbation ─────────────────────────────────────────────────
+  // Window of pert_recovery_k_win samples starting at perturbation_start + perturbation_window.
+  const ess_post_start_raw = time.findIndex(t => t >= perturbation_start + perturbation_window);
+  const ess_post_si        = ess_post_start_raw >= 0 ? ess_post_start_raw : n - 1;
+  const ess_post_ei        = Math.min(n - 1, ess_post_si + pert_recovery_k_win - 1);
+  const ess_post_slice     = vel.slice(ess_post_si, ess_post_ei + 1);
+  const ess_post_mean      = ess_post_slice.length > 0
+    ? ess_post_slice.reduce((a, b) => a + b, 0) / ess_post_slice.length : ref;
+  const ess_post_err       = Math.abs(ess_post_mean - ref) / ref * 100;
+  const ESS_post           = { center_time: time[ess_post_si], mean: ess_post_mean, error_pct: ess_post_err, k_start: ess_post_si, k_end: ess_post_ei };
 
-  const ESS_post = windowedMean(vel, time, ess_post_center_idx, pert_recovery_k_win);
-  const { score: ESS_post_score, comment: ESS_post_comment } = scoreESS(ESS_post, ref, ess_tol);
+  let ESS_post_score: number, ESS_post_comment: string;
+  if (ess_post_err <= ess_tol_pct) {
+    ESS_post_score   = 100;
+    ESS_post_comment = `ESS ${ess_post_err.toFixed(3)}% dentro del rango (tol ${ess_tol_pct.toFixed(1)}%) — 100/100`;
+  } else {
+    const post_over   = ess_post_err - ess_tol_pct;
+    ESS_post_score    = Math.max(0, 100 - post_over * 20);
+    ESS_post_comment  = `ESS ${ess_post_err.toFixed(3)}% fuera del rango (tol ${ess_tol_pct.toFixed(1)}%, exceso ${post_over.toFixed(3)}%) — ${ESS_post_score.toFixed(1)}/100`;
+  }
 
-  // Combined ESS score: mean of pre and post
   const ESS_score = (ESS_pre_score + ESS_post_score) / 2;
 
   // ── Perturbation recovery ─────────────────────────────────────────────────
-  // How far is the signal from ref at pert_end, expressed as %
-  const pert_end_idx  = nearestIdx(time, pert_end_time);
-  const Pert_err_pct  = Math.abs(vel[pert_end_idx] - ref) / ref * 100;
+  // Reuses the ESS_post window mean — same evaluation point, noise-robust.
+  const Pert_err_pct   = ess_post_err;
+  const pert_eval_time = time[ess_post_si];
 
   let Pert_score: number, Pert_comment: string;
   if (Pert_err_pct <= 2) {
     Pert_score   = 100;
-    Pert_comment = `Perturbacion controlada (error ${Pert_err_pct.toFixed(3)}% en t=${pert_end_time.toFixed(3)}s) — 100/100`;
+    Pert_comment = `Perturbacion controlada (error ${Pert_err_pct.toFixed(3)}% en t=${pert_eval_time.toFixed(3)}) — 100/100`;
   } else {
     Pert_score   = Math.max(0, 100 - Pert_err_pct * 20);
-    Pert_comment = `Error de perturbacion ${Pert_err_pct.toFixed(3)}% en t=${pert_end_time.toFixed(3)}s — ${Pert_score.toFixed(1)}/100`;
+    Pert_comment = `Error de perturbacion ${Pert_err_pct.toFixed(3)}% en t=${pert_eval_time.toFixed(3)} — ${Pert_score.toFixed(1)}/100`;
   }
 
   // ── Perturbation validation ──────────────────────────────────────────────────
@@ -330,10 +366,12 @@ export function analyzeResponse(
   // ── Score overrides for invalid start / perturbation ─────────────────────
   // If the experiment start is invalid, all pre-perturbation scores are zeroed.
   // If the perturbation is invalid, only the perturbation score is zeroed.
-  const eff_ST_score   = exp_start_warning ? 0 : ST_score;
-  const eff_OS_score   = exp_start_warning ? 0 : OS_score;
-  const eff_ESS_score  = exp_start_warning ? 0 : ESS_score;
-  const eff_Pert_score = pert_warning       ? 0 : Pert_score;
+  const eff_ST_score       = exp_start_warning ? 0 : ST_score;
+  const eff_OS_score       = exp_start_warning ? 0 : OS_score;
+  const eff_ESS_pre_score  = exp_start_warning ? 0 : ESS_pre_score;
+  const eff_ESS_post_score = exp_start_warning ? 0 : ESS_post_score;
+  const eff_ESS_score      = exp_start_warning ? 0 : ESS_score;
+  const eff_Pert_score     = pert_warning       ? 0 : Pert_score;
 
   // ── Final score ────────────────────────────────────────────────────────────
   const final_score =
@@ -342,8 +380,8 @@ export function analyzeResponse(
   return {
     ST_score: eff_ST_score, ST_comment, ST_prop_ok: prop_ok, settling_time_actual,
     OS_score: eff_OS_score, OS_comment, OS_val, OS_lim,
-    ESS_pre_score: exp_start_warning ? 0 : ESS_pre_score, ESS_pre_comment, ESS_pre,
-    ESS_post_score: exp_start_warning ? 0 : ESS_post_score, ESS_post_comment, ESS_post,
+    ESS_pre_score: eff_ESS_pre_score, ESS_pre_comment, ESS_pre,
+    ESS_post_score: eff_ESS_post_score, ESS_post_comment, ESS_post,
     ESS_score: eff_ESS_score,
     Pert_score: eff_Pert_score, Pert_comment, Pert_err_pct,
     final_score,
