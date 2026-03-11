@@ -351,16 +351,24 @@ export function analyzeResponse(
     ? pert_postSlice.reduce((a, b) => a + b, 0) / pert_postSlice.length
     : ref;
 
-  // z-score of mean shift: how many sigma did the mean move?
-  const pert_zScore = pert_preStd > 0
-    ? Math.abs(pert_postMean - pert_preMean) / pert_preStd
-    : 0;
+  // Detection: z-score when signal has noise, absolute % shift when noiseless (std ≈ 0).
+  // Noiseless simulations have pre_std = 0 exactly, so z-score is undefined —
+  // fall back to comparing |post_mean - pre_mean| / ref directly.
+  const PERT_MIN_SHIFT_PCT = 0.10;   // fallback: 10% of ref minimum absolute shift
+  const pert_shift     = Math.abs(pert_postMean - pert_preMean);
+  const pert_shift_pct = pert_shift / ref;
+  const pert_zScore    = pert_preStd > 0
+    ? pert_shift / pert_preStd
+    : (pert_shift_pct >= PERT_MIN_SHIFT_PCT ? Infinity : 0);
 
   let pert_warning: string | null = null;
   if (pert_preErr_pct > PERT_PRE_TOL * 100) {
     pert_warning = `Las ${pert_preSlice.length} muestras antes de la perturbación promedian ${pert_preMean.toFixed(4)} (error ${pert_preErr_pct.toFixed(1)}% respecto a la referencia). El sistema debe estar en estado estable antes de la perturbación (< ${(PERT_PRE_TOL * 100).toFixed(0)}%).`;
   } else if (pert_zScore < PERT_ZSCORE_MIN) {
-    pert_warning = `No se detecta una perturbación significativa (desplazamiento de media: ${pert_zScore.toFixed(1)}σ, se esperaba > ${PERT_ZSCORE_MIN}σ; ruido pre: std=${pert_preStd.toFixed(4)}). Verificá el tiempo de inicio de la perturbación.`;
+    const detail = pert_preStd > 0
+      ? `desplazamiento: ${pert_zScore.toFixed(1)}σ (std pre=${pert_preStd.toFixed(4)}), se esperaba > ${PERT_ZSCORE_MIN}σ`
+      : `desplazamiento: ${(pert_shift_pct * 100).toFixed(1)}% de la referencia, se esperaba > ${(PERT_MIN_SHIFT_PCT * 100).toFixed(0)}%`;
+    pert_warning = `No se detecta una perturbación significativa (${detail}). Verificá el tiempo de inicio de la perturbación.`;
   }
 
   // ── Score overrides for invalid start / perturbation ─────────────────────
