@@ -19,18 +19,45 @@
   function fmt(n: number, d = 3): string {
     return n.toFixed(d);
   }
+
+  const unit = $derived(domain === 'discreto' ? 'k' : 's');
+  const r = $derived(result as any);  // typed shorthand for new fields
 </script>
 
 <div class="stats-panel">
 
   <div class="panel-header">
     <span class="panel-title">RESULTADO DE REVISION</span>
-    <span class="domain-tag">{domain.toUpperCase()}</span>
+    <div class="header-tags">
+      {#if r.ma_window}
+        <span class="tag muted">MA={r.ma_window}</span>
+      {/if}
+      <span class="tag">{domain.toUpperCase()}</span>
+    </div>
   </div>
 
   <div class="score-row">
     <span class="score-label">NOTA FINAL</span>
     <span class="score-value {scoreClass(result.final_score)}">{fmt(result.final_score, 1)} / 100</span>
+  </div>
+
+  <!-- Score breakdown bars -->
+  <div class="breakdown-bars">
+    {#each [
+      { label: 'ST',   score: result.ST_score,   weight: config.weights.ST },
+      { label: 'OS',   score: result.OS_score,   weight: config.weights.OS },
+      { label: 'ESS',  score: result.ESS_score,  weight: config.weights.ESS },
+      { label: 'PERT', score: result.Pert_score, weight: config.weights.Pert },
+    ] as item}
+      <div class="bar-row">
+        <span class="bar-label">{item.label}</span>
+        <div class="bar-track">
+          <div class="bar-fill {scoreClass(item.score)}" style:width="{item.score}%"></div>
+        </div>
+        <span class="bar-score {scoreClass(item.score)}">{fmt(item.score, 1)}</span>
+        <span class="bar-weight">{item.weight}%</span>
+      </div>
+    {/each}
   </div>
 
   <div class="divider"></div>
@@ -40,7 +67,6 @@
       <tr>
         <th>CRITERIO</th>
         <th>DETALLE</th>
-        <th>PESO</th>
         <th>NOTA</th>
       </tr>
     </thead>
@@ -48,77 +74,100 @@
 
       <!-- Settling Time -->
       <tr>
-        <td class="crit-name">SETTLING TIME</td>
+        <td class="crit-name">SETTLING<br/>TIME</td>
         <td>
           {#if result.settling_time_actual !== null}
-            Ts = {fmt(result.settling_time_actual)}s<br />
+            T_st = {fmt(result.settling_time_actual)}{unit} (desde inicio)<br />
           {:else}
-            NO CONVERGE<br />
+            <span class="fail-text">NO CONVERGE</span><br />
           {/if}
           {fmt(result.ST_prop_ok * 100, 1)}% en banda<br />
           {#if result.rise_time !== null}
-            Tr = {fmt(result.rise_time)}s
+            T_r = {fmt(result.rise_time)}{unit} (desde inicio)
           {/if}
         </td>
-        <td>{config.weights.ST}%</td>
         <td class="{scoreClass(result.ST_score)}">{fmt(result.ST_score, 1)}</td>
       </tr>
 
-      <!-- Overshoot -->
+      <!-- Overshoot / Undershoot -->
       <tr>
-        <td class="crit-name">OVERSHOOT</td>
+        <td class="crit-name">OS /<br/>SUBIMPULSO</td>
         <td>
-          OS   = {fmt(result.OS_val)}<br />
-          Lim  = {fmt(result.OS_lim)}<br />
-          Tol  = {fmt(config.tol_os * 100, 1)}%
+          pico = {fmt(r.OS_val ?? result.OS_val)}<br />
+          lím↑ = {fmt(result.OS_lim)}<br />
+          {#if r.US_val !== undefined}
+            mín  = {fmt(r.US_val)}<br />
+          {/if}
+          tol  = ±{fmt(config.tol_os * 100, 1)}%<br />
+          {#if r.OS_iae !== undefined}
+            <span class="iae-tag">IAE<sup>1.5</sup>↑ {(r.OS_iae as number).toExponential(2)}</span>
+            {#if r.US_iae > 0}
+              <span class="iae-tag">↓ {(r.US_iae as number).toExponential(2)}</span>
+            {/if}
+          {/if}
         </td>
-        <td>{config.weights.OS}%</td>
         <td class="{scoreClass(result.OS_score)}">{fmt(result.OS_score, 1)}</td>
       </tr>
 
-      <!-- ESS pre-perturbation -->
+      <!-- ESS pre -->
       <tr>
-        <td class="crit-name">ESS PRE-PERT</td>
+        <td class="crit-name">ESS<br/>PRE-PERT</td>
         <td>
-          t_c  = {fmt(result.ESS_pre.center_time)}s<br />
+          t_c  = {fmt(result.ESS_pre.center_time)}{unit}<br />
           mean = {fmt(result.ESS_pre.mean)}<br />
           err  = {fmt(result.ESS_pre.error_pct, 3)}%<br />
-          win  = {config.ess_k_win} muestras
+          <span class="sub-detail">win={config.ess_k_win} muestras · peso {config.weights.ESS/2}%</span>
         </td>
-        <td class="sub-weight">({config.weights.ESS/2}%)</td>
         <td class="{scoreClass(result.ESS_pre_score)}">{fmt(result.ESS_pre_score, 1)}</td>
       </tr>
 
-      <!-- ESS post-perturbation -->
+      <!-- ESS post -->
       <tr>
-        <td class="crit-name">ESS POST-PERT</td>
+        <td class="crit-name">ESS<br/>POST-PERT</td>
         <td>
-          t_c  = {fmt(result.ESS_post.center_time)}s<br />
+          t_c  = {fmt(result.ESS_post.center_time)}{unit}<br />
           mean = {fmt(result.ESS_post.mean)}<br />
           err  = {fmt(result.ESS_post.error_pct, 3)}%<br />
-          win  = {config.pert_recovery_k_win} muestras
+          <span class="sub-detail">win={config.pert_recovery_k_win} muestras · peso {config.weights.ESS/2}%</span>
         </td>
-        <td class="sub-weight">({config.weights.ESS/2}%)</td>
         <td class="{scoreClass(result.ESS_post_score)}">{fmt(result.ESS_post_score, 1)}</td>
       </tr>
 
       <!-- ESS combined -->
       <tr class="combined-row">
-        <td class="crit-name">ESS COMBINADO</td>
-        <td>media(pre, post)</td>
-        <td>{config.weights.ESS}%</td>
+        <td class="crit-name">ESS<br/>COMBINADO</td>
+        <td>media(pre, post) · peso {config.weights.ESS}%</td>
         <td class="{scoreClass(result.ESS_score)}">{fmt(result.ESS_score, 1)}</td>
       </tr>
 
-      <!-- Perturbation -->
+      <!-- Perturbation recovery -->
       <tr>
-        <td class="crit-name">PERTURBACION</td>
+        <td class="crit-name">PERT<br/>RECOVERY</td>
         <td>
           err  = {fmt(result.Pert_err_pct, 3)}%<br />
-          t_ev = {fmt(config.perturbation_start + config.perturbation_window)}s<br />
-          tol  = 2%
+          t_ev = t+{fmt(config.perturbation_window)}{unit} (desde pert)<br />
+          <span class="sub-detail">tol=2% · peso {config.weights.Pert/2}%</span>
         </td>
-        <td>{config.weights.Pert}%</td>
+        <td class="{scoreClass(r.Pert_recovery_score ?? result.Pert_score)}">{fmt(r.Pert_recovery_score ?? result.Pert_score, 1)}</td>
+      </tr>
+
+      <!-- Perturbation settling -->
+      <tr>
+        <td class="crit-name">PERT<br/>SETTLING</td>
+        <td>
+          {#if r.Pert_ST_prop_ok !== undefined}
+            {fmt(r.Pert_ST_prop_ok * 100, 1)}% en banda<br />
+          {/if}
+          ventana [t+{fmt(config.perturbation_window)}, t+{fmt(config.perturbation_window + config.t_win)}]{unit}<br />
+          <span class="sub-detail">desde pert+win · peso {config.weights.Pert/2}%</span>
+        </td>
+        <td class="{scoreClass(r.Pert_ST_score ?? 0)}">{fmt(r.Pert_ST_score ?? 0, 1)}</td>
+      </tr>
+
+      <!-- Perturbation combined -->
+      <tr class="combined-row">
+        <td class="crit-name">PERT<br/>COMBINADO</td>
+        <td>media(recovery, settling) · peso {config.weights.Pert}%</td>
         <td class="{scoreClass(result.Pert_score)}">{fmt(result.Pert_score, 1)}</td>
       </tr>
 
@@ -129,11 +178,26 @@
 
   <div class="comments">
     <span class="comments-title">OBSERVACIONES</span>
+    {#if result.exp_start_warning}
+      <pre class="comment-line warn-line">> {result.exp_start_warning}</pre>
+    {/if}
+    {#if result.pert_warning}
+      <pre class="comment-line warn-line">> {result.pert_warning}</pre>
+    {/if}
+    {#if result.ess_step_warning}
+      <pre class="comment-line warn-line">> {result.ess_step_warning}</pre>
+    {/if}
     <pre class="comment-line">> {result.ST_comment}</pre>
     <pre class="comment-line">> {result.OS_comment}</pre>
+    {#if r.US_comment && r.US_score < 100}
+      <pre class="comment-line">> {r.US_comment}</pre>
+    {/if}
     <pre class="comment-line">> {result.ESS_pre_comment}</pre>
     <pre class="comment-line">> {result.ESS_post_comment}</pre>
-    <pre class="comment-line">> {result.Pert_comment}</pre>
+    <pre class="comment-line">> {r.Pert_recovery_comment ?? result.Pert_comment}</pre>
+    {#if r.Pert_ST_comment}
+      <pre class="comment-line">> {r.Pert_ST_comment}</pre>
+    {/if}
   </div>
 
 </div>
@@ -165,7 +229,9 @@
     color: var(--muted-foreground, #888);
   }
 
-  .domain-tag {
+  .header-tags { display: flex; gap: 0.4rem; align-items: center; }
+
+  .tag {
     font-size: 0.6rem;
     letter-spacing: 0.1em;
     padding: 0.15rem 0.5rem;
@@ -173,6 +239,7 @@
     border-radius: 3px;
     color: var(--muted-foreground, #888);
   }
+  .tag.muted { opacity: 0.6; border-style: dashed; }
 
   .score-row {
     display: flex;
@@ -192,11 +259,63 @@
     letter-spacing: -0.02em;
   }
 
-  .divider {
-    height: 1px;
-    background: var(--border, #333);
+  /* ── Breakdown bars ──────────────────────────────────────────── */
+  .breakdown-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 0.28rem;
   }
 
+  .bar-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .bar-label {
+    font-size: 0.6rem;
+    letter-spacing: 0.06em;
+    color: var(--muted-foreground, #888);
+    width: 2.6rem;
+    flex-shrink: 0;
+  }
+
+  .bar-track {
+    flex: 1;
+    height: 4px;
+    background: var(--border, #333);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.4s ease;
+    background: currentColor;
+    min-width: 2px;
+  }
+
+  .bar-score {
+    font-size: 0.65rem;
+    font-weight: 700;
+    width: 2.8rem;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .bar-weight {
+    font-size: 0.58rem;
+    color: var(--muted-foreground, #555);
+    width: 2rem;
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .divider { height: 1px; background: var(--border, #333); }
+
+  /* ── Metrics table ───────────────────────────────────────────── */
   .metrics-table {
     width: 100%;
     border-collapse: collapse;
@@ -228,12 +347,6 @@
     color: var(--muted-foreground, #aaa);
   }
 
-  .sub-weight {
-    font-size: 0.6rem;
-    color: var(--muted-foreground, #666);
-    text-align: right;
-  }
-
   .combined-row td {
     background: var(--accent, #1a1a1a);
     font-weight: 600;
@@ -243,13 +356,24 @@
     text-align: right;
     font-size: 0.85rem;
     font-weight: 700;
+    white-space: nowrap;
   }
 
-  .comments {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
+  .fail-text { color: #f87171; }
+
+  .sub-detail {
+    font-size: 0.6rem;
+    color: var(--muted-foreground, #666);
   }
+
+  .iae-tag {
+    font-size: 0.62rem;
+    color: var(--muted-foreground, #777);
+    display: inline-block;
+  }
+
+  /* ── Comments ────────────────────────────────────────────────── */
+  .comments { display: flex; flex-direction: column; gap: 0.2rem; }
 
   .comments-title {
     font-size: 0.6rem;
@@ -268,6 +392,8 @@
     color: var(--muted-foreground, #aaa);
     line-height: 1.6;
   }
+
+  .warn-line { color: #fbbf24; }
 
   .ok   { color: #4ade80; }
   .warn { color: #facc15; }

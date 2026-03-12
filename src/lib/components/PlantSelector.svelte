@@ -3,6 +3,8 @@
   import { plants } from '$lib/config/plants.config';
 
   interface Props {
+    collapsed?: boolean;
+    onCollapsedChange?: (v: boolean) => void;
     selectedPlant: PlantConfig | null;
     selectedDomain: 'continuo' | 'discreto' | null;
     experimentStart: number;
@@ -19,6 +21,7 @@
     selectedControlCol: string;
     hasData: boolean;
     expStartWarning: string | null;
+    essStepWarning: string | null;
     pertWarning: string | null;
     onPlantSelect: (plant: PlantConfig) => void;
     onDomainSelect: (domain: 'continuo' | 'discreto') => void;
@@ -30,6 +33,8 @@
   }
 
   let {
+    collapsed = false,
+    onCollapsedChange,
     selectedPlant,
     selectedDomain,
     experimentStart,
@@ -46,6 +51,7 @@
     selectedControlCol,
     hasData,
     expStartWarning,
+    essStepWarning,
     pertWarning,
     onPlantSelect,
     onDomainSelect,
@@ -71,26 +77,45 @@
   $effect(() => { localStart = pertStartStr; });
   $effect(() => { localWindow = pertWinStr; });
 
-  function handleExpStartInput(e: Event) {
-    localExpStart = (e.target as HTMLInputElement).value;
-    const val = parseFloat(localExpStart);
-    if (!isNaN(val) && val >= 0) onExperimentStartChange(val);
+  function commitExpStart(e: Event) {
+    const val = parseFloat((e.target as HTMLInputElement).value);
+    if (!isNaN(val) && val >= 0) {
+      localExpStart = val.toFixed(3);
+      onExperimentStartChange(val);
+    } else {
+      // Revert to last valid value
+      localExpStart = experimentStart.toFixed(3);
+    }
   }
 
-  function handleStartInput(e: Event) {
-    localStart = (e.target as HTMLInputElement).value;
-    const val = parseFloat(localStart);
-    if (!isNaN(val) && val >= 0) onPerturbationChange(val, perturbationWindow);
+  function commitStart(e: Event) {
+    const val = parseFloat((e.target as HTMLInputElement).value);
+    if (!isNaN(val) && val >= 0) {
+      localStart = val.toFixed(3);
+      onPerturbationChange(val, perturbationWindow);
+    } else {
+      localStart = perturbationStart.toFixed(3);
+    }
   }
 
-  function handleWindowInput(e: Event) {
-    localWindow = (e.target as HTMLInputElement).value;
-    const val = parseFloat(localWindow);
-    if (!isNaN(val) && val > 0) onPerturbationChange(perturbationStart, val);
+  function commitWindow(e: Event) {
+    const val = parseFloat((e.target as HTMLInputElement).value);
+    if (!isNaN(val) && val > 0) {
+      localWindow = val.toFixed(3);
+      onPerturbationChange(perturbationStart, val);
+    } else {
+      localWindow = perturbationWindow.toFixed(3);
+    }
+  }
+
+  function onKeydown(handler: (e: Event) => void) {
+    return (e: KeyboardEvent) => {
+      if (e.key === 'Enter') handler(e);
+    };
   }
 </script>
 
-<div class="selection-panel">
+<div class="selection-panel" class:collapsed>
 
   <!-- Step 1: Plant — always visible -->
   <div class="step">
@@ -110,6 +135,8 @@
       {/each}
     </div>
   </div>
+
+
 
   <!-- Step 2: CSV — appears when plant is selected -->
   {#if selectedPlant}
@@ -193,7 +220,9 @@
               step="0.001"
               min="0"
               value={localExpStart}
-              oninput={handleExpStartInput}
+              oninput={(e) => localExpStart = (e.target as HTMLInputElement).value}
+              onblur={commitExpStart}
+              onkeydown={onKeydown(commitExpStart)}
             />
           </div>
         </div>
@@ -213,7 +242,9 @@
               step="0.01"
               min="0"
               value={localStart}
-              oninput={handleStartInput}
+              oninput={(e) => localStart = (e.target as HTMLInputElement).value}
+              onblur={commitStart}
+              onkeydown={onKeydown(commitStart)}
             />
             <label class="pert-label" for="pert-window">Ventana (s)</label>
             <input
@@ -223,7 +254,9 @@
               step="0.01"
               min="0.01"
               value={localWindow}
-              oninput={handleWindowInput}
+              oninput={(e) => localWindow = (e.target as HTMLInputElement).value}
+              onblur={commitWindow}
+              onkeydown={onKeydown(commitWindow)}
             />
           </div>
         </div>
@@ -231,6 +264,10 @@
         <!-- Semaphore — only visible once domain is selected -->
         {#if pertWarning}
           <div class="exp-start-warning">{pertWarning}</div>
+        {/if}
+
+        {#if essStepWarning}
+          <div class="exp-start-warning">{essStepWarning}</div>
         {/if}
 
         <div class="semaphore-row">
@@ -244,11 +281,89 @@
 
 </div>
 
+<!-- Expand/collapse controls — outside the panel so overflow:hidden doesn't clip them -->
+{#if collapsed}
+  <button class="expand-hint" onclick={() => onCollapsedChange?.(false)}>
+    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+      <path d="M2 4.5L6 8.5L10 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <span>expandir para configurar</span>
+  </button>
+{:else if hasData}
+  <button class="collapse-btn" onclick={() => onCollapsedChange?.(true)} title="Contraer panel">
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+      <path d="M2 7.5L6 3.5L10 7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </button>
+{/if}
+
 <style>
   .selection-panel {
     display: flex;
     flex-direction: column;
     gap: 0.85rem;
+    position: relative;
+    transition: all 0.25s ease;
+  }
+
+  /* ── Collapsed state ────────────────────────────────────────────── */
+  .selection-panel {
+    transition: max-height 0.28s cubic-bezier(0.4, 0, 0.2, 1),
+                opacity 0.2s ease;
+    max-height: 600px;  /* large enough for fully expanded */
+  }
+
+  .selection-panel.collapsed {
+    max-height: 4.5rem;
+    overflow: hidden;
+  }
+
+
+
+  /* ── Expand hint (shown when collapsed) ─────────────────────────── */
+  .expand-hint {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.63rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    color: #6b7280;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.15rem 0;
+    transition: color 0.15s ease;
+    margin-left: auto;
+  }
+
+  .expand-hint:hover { color: #9ca3af; }
+
+  /* ── Collapse button (↑ bottom-right when expanded) ─────────────── */
+  .collapse-btn {
+    animation: fadeIn 0.15s ease forwards;
+  }
+
+  .collapse-btn {
+    display: flex;
+    margin-left: auto;
+    align-items: center;
+    justify-content: center;
+    width: 1.4rem;
+    height: 1.4rem;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: #6b7280;
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s;
+    padding: 0;
+  }
+
+  .collapse-btn:hover {
+    color: var(--foreground);
+    border-color: var(--foreground);
   }
 
   .step {

@@ -8,21 +8,38 @@
     config: PlantConfig;
     result: AnalysisResult;
     domain: 'continuo' | 'discreto';
+    chartHeight?: number;
   }
 
-  let { rows, config, result, domain }: Props = $props();
+  let { rows, config, result, domain, chartHeight = 400 }: Props = $props();
+
+  // Compute sampling time from first two timestamps
+  const samplingTime = $derived.by(() => {
+    if (rows.length < 2) return null;
+    const timeCol = Object.keys(rows[0])[0];
+    const dt = rows[1][timeCol] - rows[0][timeCol];
+    return dt > 0 ? dt : null;
+  });
+
+  function formatTs(dt: number): string {
+    if (dt >= 0.001) return `Ts = ${(dt * 1000).toFixed(1)} ms`;
+    return `Ts = ${dt.toFixed(6)} s`;
+  }
 
   let canvas: HTMLCanvasElement;
   let chart: any = null;
   let menuOpen = $state(false);
   let menuEl: HTMLDivElement;
 
+  let showSmoothed = $state(true);
   let lockX = $state(false);
   let lockY = $state(false);
   let xMin = $state('');
   let xMax = $state('');
   let yMin = $state('');
   let yMax = $state('');
+
+
 
   // Build annotation object from current config + result
   function buildAnnotations() {
@@ -85,20 +102,13 @@
         label: { display: true, content: 'ST', position: 'end', color: 'rgba(34,197,94,0.9)', font: { family: 'Courier New', size: 9 } }
       };
     }
-    // ESS pre-perturbation center marker
-    ann['essPreMarker'] = {
+    // ESS marker — start of the last-200-samples window used for evaluation
+    const ess_start_t = rows.length > 200 ? rows[rows.length - 200][config.time_col] : rows[0][config.time_col];
+    ann['essMarker'] = {
       type: 'line',
-      xMin: result.ESS_pre.center_time, xMax: result.ESS_pre.center_time,
+      xMin: ess_start_t, xMax: ess_start_t,
       borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [2, 5],
       label: { display: true, content: 'ESS-pre', position: 'start', color: 'rgba(34,197,94,0.65)', font: { family: 'Courier New', size: 8 } }
-    };
-    // ESS post-perturbation center marker (at end of perturbation window)
-    const pert_eval_t = config.perturbation_start + config.perturbation_window;
-    ann['essPostMarker'] = {
-      type: 'line',
-      xMin: pert_eval_t, xMax: pert_eval_t,
-      borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [2, 5],
-      label: { display: true, content: 'ESS-post', position: 'end', color: 'rgba(34,197,94,0.65)', font: { family: 'Courier New', size: 8 } }
     };
     return ann;
   }
@@ -107,11 +117,19 @@
     Chart.register(annotationPlugin, zoomPlugin);
 
     const currentDomain = domain;
-    const xLabel = currentDomain === 'discreto' ? 'Muestra (k)' : 'Tiempo (s)';
+    const xLabel = currentDomain === 'discreto' ? 'Tiempo (s)' : 'Tiempo (s)';
     const xUnit  = currentDomain === 'discreto' ? '' : 's';
 
     const time = rows.map(r => r[config.time_col]);
     const vel  = rows.map(r => r[config.control_col]);
+
+    // Smoothed signal shares the same time axis as the trimmed rows
+    // (analysis trims rows to experiment_start, so smoothed[i] aligns with time[i] after trim)
+    const exp_start_val = (config as any).experiment_start ?? 0;
+    const trimmedTime   = time.filter(t => t >= exp_start_val);
+    const smoothedData  = result.smoothed
+      ? trimmedTime.map((t, i) => ({ x: t, y: (result.smoothed as number[])[i] ?? null }))
+      : [];
 
     // Seed range inputs
     xMin = time[0].toFixed(3);
@@ -126,11 +144,21 @@
         datasets: [{
           label: config.control_col,
           data: vel,
-          borderColor: 'rgba(192,132,252,0.9)',
+          borderColor: showSmoothed ? 'rgba(192,132,252,0.5)' : 'rgba(192,132,252,0.9)',
           borderWidth: 1.5,
           pointRadius: 0,
           tension: 0,
           fill: false,
+        }, {
+          label: 'suavizado',
+          data: smoothedData,
+          borderColor: 'rgba(180,50,140,0.95)',
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0,
+          fill: false,
+          hidden: !showSmoothed,
+          parsing: false,
         }]
       },
       options: {
@@ -296,11 +324,29 @@
   });
 </script>
 
-<div class="chart-wrapper">
+<div class="chart-wrapper" style="height: {chartHeight}px">
   <canvas bind:this={canvas}></canvas>
+
+  {#if samplingTime !== null}
+    <div class="ts-label">Ts = {(samplingTime * 1000).toFixed(1)} ms</div>
+  {/if}
 
   <div class="chart-topbar">
     <span class="ctrl-hint">scroll = zoom &nbsp;|&nbsp; drag = pan</span>
+    <button
+      class="ctrl-btn smooth-btn"
+      class:active={showSmoothed}
+      onclick={() => {
+        showSmoothed = !showSmoothed;
+        if (chart) {
+          chart.data.datasets[1].hidden = !showSmoothed;
+          chart.data.datasets[0].borderColor = showSmoothed
+            ? 'rgba(192,132,252,0.5)'
+            : 'rgba(192,132,252,0.9)';
+          chart.update('none');
+        }
+      }}
+    >SUAVIZADO</button>
     <button class="ctrl-btn" onclick={resetZoom}>RESET</button>
 
     <div class="menu-anchor" bind:this={menuEl}>
@@ -347,13 +393,29 @@
       {/if}
     </div>
   </div>
+
+
 </div>
 
 <style>
   .chart-wrapper {
     position: relative;
     width: 100%;
-    height: 400px;
+    /* height is now driven by chartHeight state via inline style */
+  }
+
+
+
+  .ts-label {
+    position: absolute;
+    bottom: 3rem;
+    right: 0.5rem;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    color: rgba(107, 114, 128, 0.7);
+    pointer-events: none;
+    z-index: 5;
   }
 
   .chart-topbar {
@@ -385,6 +447,12 @@
     cursor: pointer;
     transition: all 0.15s;
     line-height: 1;
+  }
+
+  .smooth-btn.active {
+    background: rgba(34,211,238,0.15);
+    border-color: rgba(34,211,238,0.6);
+    color: rgba(34,211,238,0.9);
   }
 
   .ctrl-btn:hover {

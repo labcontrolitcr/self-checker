@@ -8,6 +8,34 @@
 
   // ── State ──────────────────────────────────────────────────────────────────
   let selectedPlant  = $state<PlantConfig | null>(null);
+  let panelCollapsed = $state(false);
+
+  // ── Chart resize handle (lives in page, between config and results) ────────
+  const CHART_MIN = 200;
+  const CHART_MAX = 900;
+  let chartHeight  = $state(400);
+  let isResizing   = $state(false);
+  let resizeStartY = 0;
+  let resizeStartH = 0;
+
+  function onResizeDown(e: PointerEvent) {
+    e.preventDefault();
+    isResizing   = true;
+    resizeStartY = e.clientY;
+    resizeStartH = chartHeight;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function onResizeMove(e: PointerEvent) {
+    if (!isResizing) return;
+    chartHeight = Math.min(CHART_MAX, Math.max(CHART_MIN, resizeStartH + e.clientY - resizeStartY));
+  }
+
+  function onResizeUp(e: PointerEvent) {
+    if (!isResizing) return;
+    isResizing = false;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+  }
   let selectedDomain = $state<'continuo' | 'discreto' | null>(null);
   let rows           = $state<Record<string, number>[]>([]);
   let result         = $state<AnalysisResult | null>(null);
@@ -234,6 +262,8 @@
 
   <section class="config-section">
     <PlantSelector
+      collapsed={panelCollapsed}
+      onCollapsedChange={(v) => panelCollapsed = v}
       {selectedPlant}
       {selectedDomain}
       {experimentStart}
@@ -250,6 +280,7 @@
       {selectedControlCol}
       {hasData}
       expStartWarning={result?.exp_start_warning ?? null}
+      essStepWarning={result?.ess_step_warning ?? null}
       pertWarning={result?.pert_warning ?? null}
       onPlantSelect={handlePlantSelect}
       onDomainSelect={handleDomainSelect}
@@ -284,10 +315,22 @@
       time_col: selectedTimeCol,
       control_col: selectedControlCol,
     }}
-    <section class="results-section">
+    <section class="results-section" class:panel-collapsed={panelCollapsed}>
       <div class="chart-area">
-        <ResponseChart {rows} config={cfg} {result} domain={selectedDomain} />
+        <ResponseChart {rows} config={cfg} {result} domain={selectedDomain} {chartHeight} />
       </div>
+
+      <div
+        class="resize-separator"
+        class:dragging={isResizing}
+        role="separator"
+        aria-label="Arrastrar para redimensionar gráfico"
+        onpointerdown={onResizeDown}
+        onpointermove={onResizeMove}
+        onpointerup={onResizeUp}
+        onpointercancel={onResizeUp}
+      ><div class="resize-grip"><span></span></div></div>
+
       <div class="stats-area">
         <StatsPanel {result} config={cfg} domain={selectedDomain} />
       </div>
@@ -365,5 +408,63 @@
     display: flex;
     flex-direction: column;
     gap: 1.2rem;
+  }
+
+  /* ── Resize separator between chart and stats ───────────────────── */
+  .resize-separator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 1.25rem;
+    cursor: ns-resize;
+    user-select: none;
+  }
+
+  .resize-grip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: 4rem;
+    height: 10px;
+    border-radius: 999px;
+    background: #374151;
+    transition: background 0.15s ease, width 0.15s ease;
+  }
+
+  .resize-grip::before,
+  .resize-grip::after,
+  .resize-grip span {
+    content: '';
+    display: block;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #fff;
+    opacity: 0.55;
+    pointer-events: none;
+    transition: opacity 0.15s ease;
+  }
+
+  .resize-separator:hover .resize-grip {
+    background: #4b5563;
+    width: 5rem;
+  }
+
+  .resize-separator:hover .resize-grip::before,
+  .resize-separator:hover .resize-grip::after,
+  .resize-separator:hover .resize-grip span {
+    opacity: 0.85;
+  }
+
+  .resize-separator.dragging .resize-grip {
+    background: #6b7280;
+    width: 5.5rem;
+  }
+
+  .resize-separator.dragging .resize-grip::before,
+  .resize-separator.dragging .resize-grip::after,
+  .resize-separator.dragging .resize-grip span {
+    opacity: 1;
   }
 </style>
