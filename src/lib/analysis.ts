@@ -293,57 +293,39 @@ export function analyzeResponse(
     }
   }
 
-  // ── OS / Undershoot: IAE^1.5 on smoothed signal ───────────────────────────
-  // Evaluation zone: from first raw entry into ST band → t_obj + t_win
-  // (before that is the transient rise — OS there is expected and already limited by OS_lim)
-  const k_os_norm = calibrateK(ref, tol_os, t_win);
+  // ── OS / Undershoot: bilinear scoring on smoothed peak ────────────────────
+  // Scoring curve (symmetric for OS and US):
+  //   pct ∈ [0, tol_os]       → score = 100 - (pct/tol_os) * 30   (100→70)
+  //   pct ∈ (tol_os, 2*tol_os] → score = 70 - ((pct-tol_os)/tol_os) * 70  (70→0)
+  //   pct > 2*tol_os           → score = 0
+  function osScore(pct: number): number {
+    if (pct <= tol_os)         return 100 - (pct / tol_os) * 30;
+    if (pct <= 2 * tol_os)     return 70 - ((pct - tol_os) / tol_os) * 70;
+    return 0;
+  }
 
-  // First raw entry into ST band (start of settled region for OS eval)
+  // First raw entry into ST band — US only valid after signal arrives
   let first_in_band_idx = pert_start_for_st - 1;
   for (let i = 0; i < pert_start_for_st; i++) {
     if (vel[i] >= st_lo && vel[i] <= st_hi) { first_in_band_idx = i; break; }
   }
 
-  // Transient zone (0 → first entry): evaluate peak OS on smoothed vs OS_lim
-  const trans_end_idx = first_in_band_idx;
-  const smoothed_trans = smoothed.slice(0, trans_end_idx + 1);
-  const OS_val_trans   = smoothed_trans.length > 0 ? Math.max(...smoothed_trans) : 0;
-  const US_val_trans   = smoothed_trans.length > 0 ? Math.min(...smoothed_trans) : 0;
+  // OS: peak of smoothed from start → pert_start (full pre-pert transient)
+  const OS_val     = smoothed.slice(0, pert_start_for_st).reduce((m, v) => v > m ? v : m, -Infinity);
+  const OS_pct     = Math.max(0, (OS_val - ref) / ref);
+  const OS_score   = osScore(OS_pct);
+  const OS_iae     = 0;  // kept for interface compatibility
 
-  // Post-entry zone (first_in_band → t_obj + t_win): IAE^1.5 for OS and undershoot
-  const eval_end_idx  = time.findIndex(t => t > t_obj + t_win);
-  const iae_end       = eval_end_idx > 0 ? eval_end_idx : Math.min(pert_start_for_st, n - 1);
+  // US not graded — keep val for possible future use
+  const US_val    = smoothed.slice(first_in_band_idx, pert_start_for_st).reduce((m, v) => v < m ? v : m, Infinity);
+  const US_iae    = 0;
+  const US_comment = '';
 
-  const OS_iae  = iaeOutOfBand(smoothed, time, st_lo, os_hi, first_in_band_idx, iae_end);
-  const US_iae  = iaeOutOfBand(smoothed, time, os_lo, st_hi, first_in_band_idx, iae_end);
-  // (US_iae uses os_lo as lower bound — undershoot below os_lo penalizes like OS above os_hi)
+  const OS_comment = OS_pct < 0.001
+    ? `OS: sin sobreimpulso (pico ${OS_val.toFixed(4)}) — ${OS_score.toFixed(1)}/100`
+    : `OS: ${(OS_pct*100).toFixed(2)}% de sobreimpulso (pico ${OS_val.toFixed(4)}, lím ±${(tol_os*100).toFixed(1)}%) — ${OS_score.toFixed(1)}/100`;
 
-  // Transient peak penalty: if smoothed peak > OS_lim, apply flat penalty proportional to excess
-  const trans_os_excess  = Math.max(0, OS_val_trans  - os_hi) / ref;
-  const trans_us_excess  = Math.max(0, os_lo - US_val_trans) / ref;
-  const TRANS_PENALTY_K  = 200;   // 1% excess over OS_lim in transient → -2pts
-
-  const OS_penalty  = Math.min(30, k_os_norm * OS_iae) + Math.min(20, trans_os_excess * TRANS_PENALTY_K);
-  const US_penalty  = Math.min(30, k_os_norm * US_iae) + Math.min(20, trans_us_excess * TRANS_PENALTY_K);
-
-  const OS_score  = Math.max(0, 100 - OS_penalty);
-  const US_score  = Math.max(0, 100 - US_penalty);
-
-  // For display: peak of smoothed in full transient (0→pert_start)
-  const smoothed_pre_pert = smoothed.slice(0, pert_start_for_st);
-  const OS_val = smoothed_pre_pert.length > 0 ? Math.max(...smoothed_pre_pert) : 0;
-  const US_val = smoothed_pre_pert.length > 0 ? Math.min(...smoothed_pre_pert) : 0;
-
-  const OS_comment = OS_penalty < 1
-    ? `Sin sobreimpulso significativo (pico suavizado ${OS_val.toFixed(4)}, lím ${os_hi.toFixed(4)}) — ${OS_score.toFixed(1)}/100`
-    : `Sobreimpulso IAE=${OS_iae.toExponential(2)} (pico ${OS_val.toFixed(4)}, lím ${os_hi.toFixed(4)}) — ${OS_score.toFixed(1)}/100`;
-  const US_comment = US_penalty < 1
-    ? `Sin subimpulso significativo (mín suavizado ${US_val.toFixed(4)}) — ${US_score.toFixed(1)}/100`
-    : `Subimpulso IAE=${US_iae.toExponential(2)} (mín ${US_val.toFixed(4)}, lím ${os_lo.toFixed(4)}) — ${US_score.toFixed(1)}/100`;
-
-  // Combined OS score (worse of the two — symmetric)
-  const OS_score_combined  = Math.min(OS_score, US_score);
-  const OS_comment_combined = OS_score <= US_score ? OS_comment : US_comment;
+  const OS_score_combined = OS_score;
 
   // ── ESS step guard ────────────────────────────────────────────────────────
   const ESS_MAX_STEP = 1.0;
@@ -547,8 +529,8 @@ export function analyzeResponse(
 
   return {
     ST_score: eff_ST_score, ST_comment, ST_prop_ok: prop_ok, settling_time_actual,
-    OS_score: eff_OS_score, OS_comment: OS_comment_combined, OS_val, OS_lim: os_hi, OS_iae,
-    US_score: Math.max(0, 100 - US_penalty), US_comment, US_val, US_iae,
+    OS_score: eff_OS_score, OS_comment, OS_val, OS_lim: os_hi, OS_iae,
+    US_score: 100, US_comment, US_val, US_iae,  // US not graded
     ESS_pre_score: eff_ESS_pre_score, ESS_pre_comment, ESS_pre,
     ESS_post_score: eff_ESS_post_score, ESS_post_comment, ESS_post,
     ESS_score: eff_ESS_score,

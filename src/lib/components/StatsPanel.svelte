@@ -89,22 +89,13 @@
         <td class="{scoreClass(result.ST_score)}">{fmt(result.ST_score, 1)}</td>
       </tr>
 
-      <!-- Overshoot / Undershoot -->
+      <!-- Overshoot -->
       <tr>
-        <td class="crit-name">OS /<br/>SUBIMPULSO</td>
+        <td class="crit-name">OVERSHOOT</td>
         <td>
           pico = {fmt(r.OS_val ?? result.OS_val)}<br />
-          lím↑ = {fmt(result.OS_lim)}<br />
-          {#if r.US_val !== undefined}
-            mín  = {fmt(r.US_val)}<br />
-          {/if}
-          tol  = ±{fmt(config.tol_os * 100, 1)}%<br />
-          {#if r.OS_iae !== undefined}
-            <span class="iae-tag">IAE<sup>1.5</sup>↑ {(r.OS_iae as number).toExponential(2)}</span>
-            {#if r.US_iae > 0}
-              <span class="iae-tag">↓ {(r.US_iae as number).toExponential(2)}</span>
-            {/if}
-          {/if}
+          OS%  = {fmt(Math.max(0, (result.OS_val - config.ref) / config.ref) * 100, 2)}%<br />
+          lím  = ±{fmt(config.tol_os * 100, 1)}%
         </td>
         <td class="{scoreClass(result.OS_score)}">{fmt(result.OS_score, 1)}</td>
       </tr>
@@ -189,9 +180,7 @@
     {/if}
     <pre class="comment-line">> {result.ST_comment}</pre>
     <pre class="comment-line">> {result.OS_comment}</pre>
-    {#if r.US_comment && r.US_score < 100}
-      <pre class="comment-line">> {r.US_comment}</pre>
-    {/if}
+
     <pre class="comment-line">> {result.ESS_pre_comment}</pre>
     <pre class="comment-line">> {result.ESS_post_comment}</pre>
     <pre class="comment-line">> {r.Pert_recovery_comment ?? result.Pert_comment}</pre>
