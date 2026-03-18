@@ -293,14 +293,14 @@ export function analyzeResponse(
     }
   }
 
-  // ── OS / Undershoot: bilinear scoring on smoothed peak ────────────────────
-  // Scoring curve (symmetric for OS and US):
-  //   pct ∈ [0, tol_os]       → score = 100 - (pct/tol_os) * 30   (100→70)
-  //   pct ∈ (tol_os, 2*tol_os] → score = 70 - ((pct-tol_os)/tol_os) * 70  (70→0)
-  //   pct > 2*tol_os           → score = 0
+  // ── OS / Undershoot: threshold-based scoring on smoothed peak ───────────────
+  // Scoring curve:
+  //   pct ∈ [0, tol_os]        → score = 100  (cumple el requisito del instructivo)
+  //   pct ∈ (tol_os, 2*tol_os] → score = 100 → 0  (penaliza proporcionalmente al exceso)
+  //   pct > 2*tol_os            → score = 0
   function osScore(pct: number): number {
-    if (pct <= tol_os)         return 100 - (pct / tol_os) * 30;
-    if (pct <= 2 * tol_os)     return 70 - ((pct - tol_os) / tol_os) * 70;
+    if (pct <= tol_os)         return 100;
+    if (pct <= 2 * tol_os)     return 100 - ((pct - tol_os) / tol_os) * 100;
     return 0;
   }
 
@@ -323,7 +323,9 @@ export function analyzeResponse(
 
   const OS_comment = OS_pct < 0.001
     ? `OS: sin sobreimpulso (pico ${OS_val.toFixed(4)}) — ${OS_score.toFixed(1)}/100`
-    : `OS: ${(OS_pct*100).toFixed(2)}% de sobreimpulso (pico ${OS_val.toFixed(4)}, lím ±${(tol_os*100).toFixed(1)}%) — ${OS_score.toFixed(1)}/100`;
+    : OS_pct <= tol_os
+      ? `OS: ${(OS_pct*100).toFixed(2)}% < ${(tol_os*100).toFixed(1)}% — dentro del límite — ${OS_score.toFixed(1)}/100`
+      : `OS: ${(OS_pct*100).toFixed(2)}% de sobreimpulso — excede límite ${(tol_os*100).toFixed(1)}% (exceso ${((OS_pct - tol_os)*100).toFixed(2)}%) — ${OS_score.toFixed(1)}/100`;
 
   const OS_score_combined = OS_score;
 
