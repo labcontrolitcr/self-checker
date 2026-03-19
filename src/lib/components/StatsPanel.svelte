@@ -1,14 +1,18 @@
 <script lang="ts">
   import type { AnalysisResult } from '$lib/analysis';
   import type { PlantConfig } from '$lib/config/plants.config';
+  import ReportGenerator from '$lib/components/ReportGenerator.svelte';
 
   interface Props {
     result: AnalysisResult;
-    config: PlantConfig;
+    config: PlantConfig & { experiment_start?: number };
     domain: 'continuo' | 'discreto';
+    rows: Record<string, number>[];
+    csvRaw: string;       // raw CSV text — used for fingerprint hash
+    csvFileName: string;  // original filename — shown in PDF config section
   }
 
-  let { result, config, domain }: Props = $props();
+  let { result, config, domain, rows, csvRaw, csvFileName }: Props = $props();
 
   function scoreClass(score: number): string {
     if (score >= 90) return 'ok';
@@ -20,8 +24,8 @@
     return n.toFixed(d);
   }
 
-  const unit = $derived(domain === 'discreto' ? 'k' : 's');
-  const r = $derived(result as any);  // typed shorthand for new fields
+  const unit = 's';  // always seconds
+  const r = $derived(result as any);
 </script>
 
 <div class="stats-panel">
@@ -33,6 +37,7 @@
         <span class="tag muted">MA={r.ma_window}</span>
       {/if}
       <span class="tag">{domain.toUpperCase()}</span>
+      <ReportGenerator {result} {config} {domain} {rows} {csvRaw} {csvFileName} />
     </div>
   </div>
 
@@ -104,10 +109,10 @@
       <tr>
         <td class="crit-name">ESS<br/>PRE-PERT</td>
         <td>
-          t_c  = {fmt(result.ESS_pre.center_time)}{unit}<br />
-          mean = {fmt(result.ESS_pre.mean)}<br />
-          err  = {fmt(result.ESS_pre.error_pct, 3)}%<br />
-          <span class="sub-detail">win={config.ess_k_win} muestras · peso {config.weights.ESS/2}%</span>
+          IAE  = {fmt(r.ESS_pre_iae ?? 0, 3)} (norm)<br />
+          fuera = {fmt(r.ESS_pre_pct_out ?? 0, 1)}% del tiempo<br />
+          mean = {fmt(result.ESS_pre.mean)} · err={fmt(result.ESS_pre.error_pct, 3)}%<br />
+          <span class="sub-detail">win={config.ess_k_win} muestras · suavizada · peso {config.weights.ESS/2}%</span>
         </td>
         <td class="{scoreClass(result.ESS_pre_score)}">{fmt(result.ESS_pre_score, 1)}</td>
       </tr>
@@ -116,10 +121,10 @@
       <tr>
         <td class="crit-name">ESS<br/>POST-PERT</td>
         <td>
-          t_c  = {fmt(result.ESS_post.center_time)}{unit}<br />
-          mean = {fmt(result.ESS_post.mean)}<br />
-          err  = {fmt(result.ESS_post.error_pct, 3)}%<br />
-          <span class="sub-detail">win={config.pert_recovery_k_win} muestras · peso {config.weights.ESS/2}%</span>
+          IAE  = {fmt(r.ESS_post_iae ?? 0, 3)} (norm)<br />
+          fuera = {fmt(r.ESS_post_pct_out ?? 0, 1)}% del tiempo<br />
+          mean = {fmt(result.ESS_post.mean)} · err={fmt(result.ESS_post.error_pct, 3)}%<br />
+          <span class="sub-detail">últimas {config.ess_k_win} muestras · suavizada · peso {config.weights.ESS/2}%</span>
         </td>
         <td class="{scoreClass(result.ESS_post_score)}">{fmt(result.ESS_post_score, 1)}</td>
       </tr>
@@ -131,17 +136,6 @@
         <td class="{scoreClass(result.ESS_score)}">{fmt(result.ESS_score, 1)}</td>
       </tr>
 
-      <!-- Perturbation recovery -->
-      <tr>
-        <td class="crit-name">PERT<br/>RECOVERY</td>
-        <td>
-          err  = {fmt(result.Pert_err_pct, 3)}%<br />
-          t_ev = t+{fmt(config.perturbation_window)}{unit} (desde pert)<br />
-          <span class="sub-detail">tol=2% · peso {config.weights.Pert/2}%</span>
-        </td>
-        <td class="{scoreClass(r.Pert_recovery_score ?? result.Pert_score)}">{fmt(r.Pert_recovery_score ?? result.Pert_score, 1)}</td>
-      </tr>
-
       <!-- Perturbation settling -->
       <tr>
         <td class="crit-name">PERT<br/>SETTLING</td>
@@ -150,17 +144,29 @@
             {fmt(r.Pert_ST_prop_ok * 100, 1)}% en banda<br />
           {/if}
           ventana [t+{fmt(config.perturbation_window)}, t+{fmt(config.perturbation_window + config.t_win)}]{unit}<br />
-          <span class="sub-detail">desde pert+win · peso {config.weights.Pert/2}%</span>
+          <span class="sub-detail">1/3 del peso · suavizada</span>
         </td>
         <td class="{scoreClass(r.Pert_ST_score ?? 0)}">{fmt(r.Pert_ST_score ?? 0, 1)}</td>
+      </tr>
+
+      <!-- Perturbation ESS -->
+      <tr>
+        <td class="crit-name">PERT<br/>ESS</td>
+        <td>
+          IAE  = {fmt(r.Pert_ESS_iae ?? 0, 3)} (norm)<br />
+          fuera = {fmt(r.Pert_ESS_pct_out ?? 0, 1)}% del tiempo<br />
+          <span class="sub-detail">tol={(config as any).pert_recovery_tol !== undefined ? ((config as any).pert_recovery_tol*100).toFixed(1) : "2.0"}% · 1/3 del peso · suavizada</span>
+        </td>
+        <td class="{scoreClass(r.Pert_ESS_score ?? 0)}">{fmt(r.Pert_ESS_score ?? 0, 1)}</td>
       </tr>
 
       <!-- Perturbation combined -->
       <tr class="combined-row">
         <td class="crit-name">PERT<br/>COMBINADO</td>
-        <td>media(recovery, settling) · peso {config.weights.Pert}%</td>
+        <td>(detectada + settling + ESS_pert) / 3 · peso {config.weights.Pert}%</td>
         <td class="{scoreClass(result.Pert_score)}">{fmt(result.Pert_score, 1)}</td>
       </tr>
+
 
     </tbody>
   </table>
@@ -183,9 +189,12 @@
 
     <pre class="comment-line">> {result.ESS_pre_comment}</pre>
     <pre class="comment-line">> {result.ESS_post_comment}</pre>
-    <pre class="comment-line">> {r.Pert_recovery_comment ?? result.Pert_comment}</pre>
+    <pre class="comment-line">> {result.Pert_comment}</pre>
     {#if r.Pert_ST_comment}
       <pre class="comment-line">> {r.Pert_ST_comment}</pre>
+    {/if}
+    {#if r.Pert_ESS_comment}
+      <pre class="comment-line">> {r.Pert_ESS_comment}</pre>
     {/if}
   </div>
 
@@ -387,4 +396,179 @@
   .ok   { color: #4ade80; }
   .warn { color: #facc15; }
   .fail { color: #f87171; }
+
+
+
+  /* ── Modal ───────────────────────────────────────────────────────── */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(2px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-box {
+    font-family: 'Courier New', Courier, monospace;
+    background: var(--card, #111);
+    border: 1px solid var(--border, #333);
+    border-radius: 6px;
+    padding: 1.2rem 1.4rem;
+    width: min(420px, 90vw);
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.6);
+  }
+
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+  }
+
+  .modal-title {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    color: var(--foreground, #e5e5e5);
+  }
+
+  .modal-sub {
+    display: block;
+    font-size: 0.6rem;
+    color: var(--muted-foreground, #666);
+    margin-top: 0.15rem;
+  }
+
+  .modal-close {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.75rem;
+    background: none;
+    border: none;
+    color: var(--muted-foreground, #666);
+    cursor: pointer;
+    padding: 0.1rem 0.3rem;
+    transition: color 0.15s;
+    line-height: 1;
+  }
+  .modal-close:hover { color: var(--foreground, #eee); }
+
+  .modal-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .field-label {
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    color: var(--muted-foreground, #777);
+    margin-bottom: 0.15rem;
+    display: block;
+  }
+
+  .field-input {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.72rem;
+    padding: 0.3rem 0.6rem;
+    background: var(--background, #0d0d0d);
+    border: 1px solid var(--border, #333);
+    border-radius: 4px;
+    color: var(--foreground, #e5e5e5);
+    width: 100%;
+    transition: border-color 0.15s;
+  }
+  .field-input:focus { outline: none; border-color: var(--foreground, #888); }
+  .field-input::placeholder { color: var(--muted-foreground, #444); }
+
+  .field-row { display: flex; align-items: center; gap: 0.5rem; }
+  .field-ext { font-size: 0.65rem; color: var(--muted-foreground, #555); white-space: nowrap; }
+
+  .modal-info {
+    background: var(--accent, #141414);
+    border: 1px solid var(--border, #222);
+    border-radius: 4px;
+    padding: 0.6rem 0.8rem;
+  }
+
+  .info-title {
+    display: block;
+    font-size: 0.58rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    color: var(--muted-foreground, #555);
+    margin-bottom: 0.4rem;
+  }
+
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 0.2rem 0.5rem;
+    font-size: 0.62rem;
+  }
+
+  .info-grid span:nth-child(odd) { color: var(--muted-foreground, #555); }
+  .info-grid span:nth-child(even) { color: var(--foreground, #ccc); }
+
+  .modal-error {
+    font-size: 0.65rem;
+    color: #f87171;
+    background: rgba(239,68,68,0.08);
+    border: 1px solid rgba(239,68,68,0.3);
+    border-radius: 3px;
+    padding: 0.4rem 0.6rem;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 0.6rem;
+  }
+
+  .action-btn {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 0.4rem 0.8rem;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+  }
+
+  .action-btn.cancel {
+    background: var(--background, #0d0d0d);
+    border: 1px solid var(--border, #333);
+    color: var(--muted-foreground, #888);
+  }
+  .action-btn.cancel:hover:not(:disabled) { border-color: var(--foreground); color: var(--foreground); }
+
+  .action-btn.confirm {
+    background: var(--foreground, #e5e5e5);
+    border: 1px solid var(--foreground, #e5e5e5);
+    color: var(--background, #0d0d0d);
+  }
+  .action-btn.confirm:hover:not(:disabled) { opacity: 0.85; }
+  .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .spinner {
+    width: 10px; height: 10px;
+    border: 1.5px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: inline-block;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
 </style>

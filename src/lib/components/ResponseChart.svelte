@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import type { PlantConfig } from '$lib/config/plants.config';
+  import { DEFAULT_CHART_CONFIG } from '$lib/config/plants.config';
   import type { AnalysisResult } from '$lib/analysis';
+  import ChartLegend from '$lib/components/ChartLegend.svelte';
 
   interface Props {
     rows: Record<string, number>[];
@@ -31,9 +33,45 @@
   let menuOpen = $state(false);
   let menuEl: HTMLDivElement;
 
-  let showSmoothed = $state(true);
   let lockX = $state(false);
   let lockY = $state(false);
+  let chartFontSize = $state({ ...DEFAULT_CHART_CONFIG, ...(config.chart_config ?? {}) }.font_size);
+
+  // Merge plant chart_config over defaults → seed legendItems
+  function makeLegendItems(cfg: PlantConfig) {
+    const c = { ...DEFAULT_CHART_CONFIG, ...(cfg.chart_config ?? {}) };
+    return [
+      { id: 'raw',      label: 'Señal raw',   color: c.raw,      visible: true, type: 'signal' as const },
+      { id: 'smoothed', label: 'Suavizado',    color: c.smoothed, visible: true, type: 'signal' as const },
+      { id: 'ref',      label: 'Referencia',   color: c.ref,      visible: true, type: 'line'   as const },
+      { id: 'st_band',  label: 'Banda ST',     color: c.st_band,  visible: true, type: 'line'   as const },
+      { id: 'os_lim',   label: 'Límite OS',    color: c.os_lim,   visible: true, type: 'line'   as const },
+      { id: 'eval_win', label: 'Ventana ST',   color: c.eval_win, visible: true, type: 'region' as const },
+      { id: 'ess_win',  label: 'Ventana ESS',  color: c.ess_win,  visible: true, type: 'region' as const },
+      { id: 'pert_win', label: 'Ventana PERT', color: c.pert_win, visible: true, type: 'region' as const },
+    ];
+  }
+
+  // Legend items — source of truth for all visual toggles + colors
+  // Re-seeded from config whenever the plant changes
+  let legendItems = $state(makeLegendItems(config));
+
+  // Derived visibility + color helpers
+  const vis  = $derived(Object.fromEntries(legendItems.map(i => [i.id, i.visible])));
+  const col  = $derived(Object.fromEntries(legendItems.map(i => [i.id, i.color])));
+
+  // Derived: keep chart datasets in sync with legend
+  $effect(() => {
+    if (!chart) return;
+    const raw = chart.data.datasets[0];
+    const sm  = chart.data.datasets[1];
+    raw.borderColor = vis.raw
+      ? (vis.smoothed ? col.raw + '80' : col.raw)
+      : 'transparent';
+    sm.borderColor  = vis.smoothed ? col.smoothed : 'transparent';
+    sm.hidden       = !vis.smoothed;
+    chart.update('none');
+  });
   let xMin = $state('');
   let xMax = $state('');
   let yMin = $state('');
@@ -43,55 +81,86 @@
 
   // Build annotation object from current config + result
   function buildAnnotations() {
-    const { ref, tol_st, tol_os, t_obj, perturbation_start, perturbation_window } = config;
+    const { ref, tol_st, tol_os, t_obj, t_win, perturbation_start, perturbation_window } = config;
     const exp_start = (config as any).experiment_start ?? 0;
-    const t_obj_abs = t_obj + exp_start;  // absolute time: offset by experiment start
+    const t_obj_abs = t_obj + exp_start;
     const hi_st = ref * (1 + tol_st);
     const lo_st = ref * (1 - tol_st);
     const hi_os = ref * (1 + tol_os);
+    const fs    = chartFontSize;
+
+    // Helper: hex color → rgba with alpha
+    function rgba(hex: string, a: number) {
+      const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+      return `rgba(${r},${g},${b},${a})`;
+    }
 
     const ann: Record<string, any> = {
       refLine: {
         type: 'line', yMin: ref, yMax: ref,
-        borderColor: 'rgba(59,130,246,0.8)', borderWidth: 1.5, borderDash: [4, 4],
-        label: { display: true, content: 'REF', position: 'start', color: 'rgba(59,130,246,0.9)', font: { family: 'Courier New', size: 10 } }
+        borderColor: vis.ref ? rgba(col.ref, 0.8) : 'transparent', borderWidth: 1.5, borderDash: [4, 4],
+        label: { display: vis.ref, content: 'REF', position: 'start', color: rgba(col.ref, 0.9), font: { family: 'Courier New', size: fs } }
       },
       stHi: {
         type: 'line', yMin: hi_st, yMax: hi_st,
-        borderColor: 'rgba(59,130,246,0.45)', borderWidth: 1, borderDash: [3, 6],
-        label: { display: true, content: `+${(tol_st*100).toFixed(0)}%`, position: 'end', color: 'rgba(59,130,246,0.7)', font: { family: 'Courier New', size: 9 } }
+        borderColor: vis.st_band ? rgba(col.st_band, 0.45) : 'transparent', borderWidth: 1, borderDash: [3, 6],
+        label: { display: vis.st_band, content: `+${(tol_st*100).toFixed(0)}%`, position: 'end', color: rgba(col.st_band, 0.7), font: { family: 'Courier New', size: fs - 1 } }
       },
       stLo: {
         type: 'line', yMin: lo_st, yMax: lo_st,
-        borderColor: 'rgba(59,130,246,0.45)', borderWidth: 1, borderDash: [3, 6],
-        label: { display: true, content: `-${(tol_st*100).toFixed(0)}%`, position: 'end', color: 'rgba(59,130,246,0.7)', font: { family: 'Courier New', size: 9 } }
+        borderColor: vis.st_band ? rgba(col.st_band, 0.45) : 'transparent', borderWidth: 1, borderDash: [3, 6],
+        label: { display: vis.st_band, content: `-${(tol_st*100).toFixed(0)}%`, position: 'end', color: rgba(col.st_band, 0.7), font: { family: 'Courier New', size: fs - 1 } }
       },
       osLim: {
         type: 'line', yMin: hi_os, yMax: hi_os,
-        borderColor: 'rgba(239,68,68,0.7)', borderWidth: 1.5, borderDash: [6, 3],
-        label: { display: true, content: `OS ${(tol_os*100).toFixed(0)}%`, position: 'start', color: 'rgba(239,68,68,0.85)', font: { family: 'Courier New', size: 9 } }
+        borderColor: vis.os_lim ? rgba(col.os_lim, 0.7) : 'transparent', borderWidth: 1.5, borderDash: [6, 3],
+        label: { display: vis.os_lim, content: `OS ${(tol_os*100).toFixed(0)}%`, position: 'start', color: rgba(col.os_lim, 0.85), font: { family: 'Courier New', size: fs - 1 } }
       },
       prohibitedZone: {
-        type: 'box',
-        yMin: hi_os,
+        type: 'box', yMin: hi_os,
         yMax: config.y_limits ? config.y_limits[1] : hi_os * 1.05,
-        backgroundColor: 'rgba(239,68,68,0.07)', borderWidth: 0,
+        backgroundColor: vis.os_lim ? rgba(col.os_lim, 0.06) : 'transparent', borderWidth: 0,
       },
       stDeadline: {
         type: 'line', xMin: t_obj_abs, xMax: t_obj_abs,
         borderColor: 'rgba(234,179,8,0.7)', borderWidth: 1.5, borderDash: [5, 4],
-        label: { display: true, content: 'T_st', position: 'start', color: 'rgba(234,179,8,0.9)', font: { family: 'Courier New', size: 9 } }
+        label: { display: true, content: 'T_st', position: 'start', color: 'rgba(234,179,8,0.9)', font: { family: 'Courier New', size: fs - 1 } }
       },
       pertStart: {
         type: 'line', xMin: perturbation_start, xMax: perturbation_start,
-        borderColor: 'rgba(168,85,247,0.7)', borderWidth: 1.5, borderDash: [4, 4],
-        label: { display: true, content: 'PERT', position: 'end', color: 'rgba(168,85,247,0.9)', font: { family: 'Courier New', size: 9 } }
+        borderColor: rgba(col.pert_win, 0.8), borderWidth: 1.5, borderDash: [4, 4],
+        label: { display: true, content: 'PERT', position: 'end', color: rgba(col.pert_win, 0.9), font: { family: 'Courier New', size: fs - 1 } }
       },
+      // Perturbation zone
       pertZone: {
+        type: 'box', xMin: perturbation_start, xMax: perturbation_start + perturbation_window,
+        backgroundColor: vis.pert_win ? rgba(col.pert_win, 0.15) : 'transparent', borderWidth: 0,
+      },
+      // Settling eval window
+      evalWindow: {
+        type: 'box', xMin: t_obj_abs, xMax: t_obj_abs + t_win,
+        backgroundColor: vis.eval_win ? rgba(col.eval_win, 0.15) : 'transparent', borderWidth: 0,
+      },
+      // ESS pre window
+      essPreWindow: {
         type: 'box',
-        xMin: perturbation_start,
-        xMax: perturbation_start + perturbation_window,
-        backgroundColor: 'rgba(168,85,247,0.07)', borderWidth: 0,
+        xMin: result.ESS_pre.k_start >= 0 ? (rows[result.ESS_pre.k_start]?.[config.time_col] ?? perturbation_start - 1) : perturbation_start - 1,
+        xMax: perturbation_start,
+        backgroundColor: vis.ess_win ? rgba(col.ess_win, 0.15) : 'transparent', borderWidth: 0,
+      },
+      // ESS post window
+      essPostWindow: {
+        type: 'box',
+        xMin: result.ESS_post.k_start >= 0 ? (rows[result.ESS_post.k_start]?.[config.time_col] ?? perturbation_start + perturbation_window) : perturbation_start + perturbation_window,
+        xMax: result.ESS_post.k_end >= 0 && rows[result.ESS_post.k_end] ? rows[result.ESS_post.k_end][config.time_col] : (rows[rows.length - 1]?.[config.time_col] ?? perturbation_start + 5),
+        backgroundColor: vis.ess_win ? rgba(col.ess_win, 0.15) : 'transparent', borderWidth: 0,
+      },
+      // Pert ESS recovery window — same color as ess_win but distinct region
+      pertESSWindow: {
+        type: 'box',
+        xMin: perturbation_start + perturbation_window,
+        xMax: perturbation_start + perturbation_window + t_win,
+        backgroundColor: vis.ess_win ? rgba(col.ess_win, 0.10) : 'transparent', borderWidth: 0,
       },
     };
 
@@ -144,7 +213,7 @@
         datasets: [{
           label: config.control_col,
           data: vel,
-          borderColor: showSmoothed ? 'rgba(192,132,252,0.5)' : 'rgba(192,132,252,0.9)',
+          borderColor: legendItems.find(i => i.id === 'smoothed')?.visible ? legendItems.find(i => i.id === 'raw')?.color + '80' : legendItems.find(i => i.id === 'raw')?.color ?? '#c084fc',
           borderWidth: 1.5,
           pointRadius: 0,
           tension: 0,
@@ -152,12 +221,12 @@
         }, {
           label: 'suavizado',
           data: smoothedData,
-          borderColor: 'rgba(180,50,140,0.95)',
+          borderColor: legendItems.find(i => i.id === 'smoothed')?.color ?? '#b4328c',
           borderWidth: 2,
           pointRadius: 0,
           tension: 0,
           fill: false,
-          hidden: !showSmoothed,
+          hidden: !(legendItems.find(i => i.id === 'smoothed')?.visible ?? true),
           parsing: false,
         }]
       },
@@ -211,15 +280,19 @@
     });
   }
 
-  // Hot-update annotations when config (perturbation/experiment_start) or result changes
-  // without rebuilding the whole chart
+  // Hot-update annotations when config, result, legend, or font changes
   $effect(() => {
-    const _ps = config.perturbation_start;
-    const _pw = config.perturbation_window;
-    const _es = (config as any).experiment_start;
-    const _st = result.settling_time_actual;
+    const _ps  = config.perturbation_start;
+    const _pw  = config.perturbation_window;
+    const _es  = (config as any).experiment_start;
+    const _st  = result.settling_time_actual;
+    const _leg = legendItems.map(i => i.visible + i.color).join();
+    const _fs  = chartFontSize;
     if (chart) {
       chart.options.plugins.annotation.annotations = buildAnnotations();
+      // update axis font sizes
+      chart.options.scales.x.ticks.font.size = chartFontSize;
+      chart.options.scales.y.ticks.font.size = chartFontSize;
       chart.update('none');
     }
   });
@@ -315,6 +388,9 @@
   $effect(() => {
     const _r = rows.length;
     const _d = domain;
+    // Re-seed colors and font size from new plant config on rebuild
+    legendItems = makeLegendItems(config);
+    chartFontSize = { ...DEFAULT_CHART_CONFIG, ...(config.chart_config ?? {}) }.font_size;
     if (chart) {
       chart.destroy();
       chart = null;
@@ -333,21 +409,14 @@
 
   <div class="chart-topbar">
     <span class="ctrl-hint">scroll = zoom &nbsp;|&nbsp; drag = pan</span>
-    <button
-      class="ctrl-btn smooth-btn"
-      class:active={showSmoothed}
-      onclick={() => {
-        showSmoothed = !showSmoothed;
-        if (chart) {
-          chart.data.datasets[1].hidden = !showSmoothed;
-          chart.data.datasets[0].borderColor = showSmoothed
-            ? 'rgba(192,132,252,0.5)'
-            : 'rgba(192,132,252,0.9)';
-          chart.update('none');
-        }
-      }}
-    >SUAVIZADO</button>
     <button class="ctrl-btn" onclick={resetZoom}>RESET</button>
+
+    <ChartLegend
+      items={legendItems}
+      fontSize={chartFontSize}
+      onItemsChange={(items) => { legendItems = items; }}
+      onFontSizeChange={(s) => { chartFontSize = s; }}
+    />
 
     <div class="menu-anchor" bind:this={menuEl}>
       <button
@@ -570,4 +639,6 @@
     background: var(--foreground, #eee);
     color: var(--background, #0d0d0d);
   }
+
+
 </style>

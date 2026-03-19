@@ -32,20 +32,26 @@ export interface AnalysisResult {
   ESS_pre_score: number;
   ESS_pre_comment: string;
   ESS_pre: ESSWindow;
+  ESS_pre_iae: number;        // normalized IAE on smoothed (0=perfect, 1=always at edge)
+  ESS_pre_pct_out: number;    // % of window where smoothed exceeded ESS band
   ESS_post_score: number;
   ESS_post_comment: string;
   ESS_post: ESSWindow;
+  ESS_post_iae: number;
+  ESS_post_pct_out: number;
   ESS_score: number;
 
   // Perturbation
-  Pert_score: number;          // combined (recovery + settling) / 2
+  Pert_score: number;          // (detected + ST_pert + ESS_pert) / 3
   Pert_comment: string;
   Pert_err_pct: number;
-  Pert_recovery_score: number;
-  Pert_recovery_comment: string;
   Pert_ST_score: number;
   Pert_ST_comment: string;
   Pert_ST_prop_ok: number;
+  Pert_ESS_score: number;
+  Pert_ESS_comment: string;
+  Pert_ESS_iae: number;
+  Pert_ESS_pct_out: number;
 
   // Final
   final_score: number;
@@ -161,7 +167,7 @@ export function analyzeResponse(
   const {
     time_col, control_col,
     ref, tol_st, t_obj, t_win, tol_os, ess_tol, ess_k_win,
-    perturbation_start, perturbation_window, pert_recovery_k_win,
+    perturbation_start, perturbation_window, pert_recovery_k_win, pert_recovery_tol,
     weights,
     experiment_start = 0,
   } = config;
@@ -338,12 +344,42 @@ export function analyzeResponse(
     return false;
   }
 
-  // ── ESS pre ───────────────────────────────────────────────────────────────
-  const ess_band_half      = tol_st * ref;
-  const ESS_STD_WARN       = 0.6;   // std > 60% of band_half → starts penalizing
-  const ESS_STD_ZERO       = 1.0;
-  const ess_tol_pct        = ess_tol * 100;
+  // ── ESS helper: IAE normalizado sobre suavizada ───────────────────────────
+  // Mide cuánto y por cuánto tiempo la suavizada se aleja de la banda ESS.
+  //
+  //   iae_norm = Σ max(0, |smoothed[i] - ref| - ess_tol*ref) * dt
+  //             ─────────────────────────────────────────────────────
+  //                       (ess_tol * ref) * T_win
+  //
+  // = 0   → suavizada siempre dentro de la banda (100/100)
+  // = 1   → suavizada siempre exactamente en el borde durante toda la ventana (0/100)
+  // > 1   → saturado a 0/100
+  //
+  // La raw solo sirve para detectar saltos bruscos (datos corruptos).
+  // El step-guard se mantiene sobre raw para eso.
+  const ess_tol_pct  = ess_tol * 100;
+  const ess_band_abs = ess_tol * ref;   // absolute ESS tolerance in signal units
 
+  function essIAE(si: number, ei: number): number {
+    if (ei <= si) return 0;
+    const T_win = time[ei] - time[si];
+    if (T_win <= 0 || !isFinite(T_win)) return 0;
+    let area = 0;
+    for (let i = si; i <= ei; i++) {
+      const excess = Math.max(0, Math.abs(smoothed[i] - ref) - ess_band_abs);
+      const dti    = i < ei ? time[i + 1] - time[i] : time[i] - time[i - 1];
+      area += excess * Math.abs(dti);
+    }
+    // Normalize: divide by (band_abs * T_win) → 1 when always at the edge
+    return area / (ess_band_abs * T_win);
+  }
+
+  function essScoreFromIAE(iae_norm: number): number {
+    // Linear from 100 (iae=0) to 0 (iae≥1)
+    return Math.max(0, 100 * (1 - iae_norm));
+  }
+
+  // ── ESS pre ───────────────────────────────────────────────────────────────
   const ess_pre_end_i   = Math.max(0, pert_start_for_st - 1);
   const ess_pre_start_i = Math.max(0, ess_pre_end_i - ess_k_win + 1);
   const ess_pre_slice   = vel.slice(ess_pre_start_i, ess_pre_end_i + 1);
@@ -352,116 +388,119 @@ export function analyzeResponse(
   const ess_pre_err     = Math.abs(ess_pre_mean - ref) / ref * 100;
   const ESS_pre: ESSWindow = { center_time: time[ess_pre_end_i], mean: ess_pre_mean, error_pct: ess_pre_err, k_start: ess_pre_start_i, k_end: ess_pre_end_i };
 
-  const ess_pre_step_bad   = hasExcessiveStep(ess_pre_slice);
-  const ess_pre_std        = ess_pre_slice.length > 1
-    ? Math.sqrt(ess_pre_slice.reduce((acc, v) => acc + (v - ess_pre_mean) ** 2, 0) / (ess_pre_slice.length - 1)) : 0;
-  const ess_pre_std_ratio  = ess_pre_std / ess_band_half;
-  const ess_pre_std_factor = ess_pre_std_ratio <= ESS_STD_WARN ? 1.0
-    : ess_pre_std_ratio >= ESS_STD_ZERO ? 0.0
-    : 1.0 - (ess_pre_std_ratio - ESS_STD_WARN) / (ESS_STD_ZERO - ESS_STD_WARN);
+  const ess_pre_step_bad = hasExcessiveStep(ess_pre_slice);
+  const ess_pre_iae      = essIAE(ess_pre_start_i, ess_pre_end_i);
+  const ess_pre_pct_out  = (() => {
+    let out = 0;
+    for (let i = ess_pre_start_i; i <= ess_pre_end_i; i++) {
+      if (Math.abs(smoothed[i] - ref) > ess_band_abs) out++;
+    }
+    return ess_pre_end_i > ess_pre_start_i
+      ? out / (ess_pre_end_i - ess_pre_start_i + 1) * 100 : 0;
+  })();
 
   let ESS_pre_score: number, ESS_pre_comment: string;
   if (ess_pre_step_bad) {
     ESS_pre_score   = 0;
     ESS_pre_comment = `ESS pre inválido: salto > ${ESS_MAX_STEP}V en ventana — 0/100`;
-  } else if (ess_pre_std_factor === 0.0) {
-    ESS_pre_score   = 0;
-    ESS_pre_comment = `Señal demasiado ruidosa pre-perturbación (std=${ess_pre_std.toFixed(4)}, ${ess_pre_std_ratio.toFixed(2)}× banda ±${ess_band_half.toFixed(3)}) — el sistema no está controlado — 0/100`;
   } else {
-    if (ess_pre_err <= ess_tol_pct) {
-      ESS_pre_score   = 100 * ess_pre_std_factor;
-      ESS_pre_comment = ess_pre_std_factor < 1.0
-        ? `ESS ${ess_pre_err.toFixed(3)}% en rango pero ruidoso (std=${ess_pre_std.toFixed(4)}) — ${ESS_pre_score.toFixed(1)}/100`
-        : `ESS ${ess_pre_err.toFixed(3)}% dentro del rango (tol ${ess_tol_pct.toFixed(1)}%) — 100/100`;
+    ESS_pre_score   = essScoreFromIAE(ess_pre_iae);
+    if (ess_pre_iae === 0) {
+      ESS_pre_comment = `ESS pre: suavizada siempre en banda ±${ess_tol_pct.toFixed(1)}% — 100/100`;
     } else {
-      const pre_over = ess_pre_err - ess_tol_pct;
-      const base = pre_over <= ess_tol_pct
-        ? Math.max(0, 100 - pre_over * (50 / ess_tol_pct))
-        : Math.max(0, 50  - (pre_over - ess_tol_pct) * (50 / (2 * ess_tol_pct)));
-      ESS_pre_score   = base * ess_pre_std_factor;
-      ESS_pre_comment = `ESS ${ess_pre_err.toFixed(3)}% fuera del rango (tol ${ess_tol_pct.toFixed(1)}%, exceso ${pre_over.toFixed(3)}%${ess_pre_std_factor < 1.0 ? `, ruidoso std=${ess_pre_std.toFixed(4)}` : ''}) — ${ESS_pre_score.toFixed(1)}/100`;
+      ESS_pre_comment = `ESS pre: IAE_norm=${ess_pre_iae.toFixed(3)}, ${ess_pre_pct_out.toFixed(1)}% del tiempo fuera de banda (tol ±${ess_tol_pct.toFixed(1)}%) — ${ESS_pre_score.toFixed(1)}/100`;
     }
   }
 
-  // ── ESS post ──────────────────────────────────────────────────────────────
-  const ess_post_search_start = time.findIndex(t => t >= perturbation_start + perturbation_window);
-  const ess_post_search_si    = ess_post_search_start >= 0 ? ess_post_search_start : n - 1;
-
-  let ess_post_stable_idx: number | null = null;
-  let ess_post_consec = 0;
-  for (let i = ess_post_search_si + ST_MA_WIN; i < n; i++) {
-    const ma = smoothed[i];
-    if (ma >= st_lo && ma <= st_hi) {
-      ess_post_consec++;
-      if (ess_post_consec >= ST_MA_CONSEC && ess_post_stable_idx === null) {
-        ess_post_stable_idx = i - ST_MA_CONSEC + 1;
-      }
-    } else {
-      ess_post_consec = 0;
-    }
-  }
-
-  const ess_post_si    = ess_post_stable_idx ?? ess_post_search_si;
-  const ess_post_ei    = Math.min(n - 1, ess_post_si + pert_recovery_k_win - 1);
+  // ── ESS post — symmetric, últimas ess_k_win muestras del experimento ──────
+  const ess_post_ei    = n - 1;
+  const ess_post_si    = Math.max(0, ess_post_ei - ess_k_win + 1);
   const ess_post_slice = vel.slice(ess_post_si, ess_post_ei + 1);
   const ess_post_mean  = ess_post_slice.length > 0
     ? ess_post_slice.reduce((a, b) => a + b, 0) / ess_post_slice.length : ref;
   const ess_post_err   = Math.abs(ess_post_mean - ref) / ref * 100;
   const ESS_post: ESSWindow = { center_time: time[ess_post_si], mean: ess_post_mean, error_pct: ess_post_err, k_start: ess_post_si, k_end: ess_post_ei };
 
-  const ess_post_step_bad   = hasExcessiveStep(ess_post_slice);
-  const ess_post_std        = ess_post_slice.length > 1
-    ? Math.sqrt(ess_post_slice.reduce((acc, v) => acc + (v - ess_post_mean) ** 2, 0) / (ess_post_slice.length - 1)) : 0;
-  const ess_post_std_ratio  = ess_post_std / ess_band_half;
-  const ess_post_std_factor = ess_post_std_ratio <= ESS_STD_WARN ? 1.0
-    : ess_post_std_ratio >= ESS_STD_ZERO ? 0.0
-    : 1.0 - (ess_post_std_ratio - ESS_STD_WARN) / (ESS_STD_ZERO - ESS_STD_WARN);
+  const ess_post_step_bad = hasExcessiveStep(ess_post_slice);
+  const ess_post_iae      = essIAE(ess_post_si, ess_post_ei);
+  const ess_post_pct_out  = (() => {
+    let out = 0;
+    for (let i = ess_post_si; i <= ess_post_ei; i++) {
+      if (Math.abs(smoothed[i] - ref) > ess_band_abs) out++;
+    }
+    return ess_post_ei > ess_post_si
+      ? out / (ess_post_ei - ess_post_si + 1) * 100 : 0;
+  })();
 
   let ESS_post_score: number, ESS_post_comment: string;
   if (ess_post_step_bad) {
     ESS_post_score   = 0;
     ESS_post_comment = `ESS post inválido: salto > ${ESS_MAX_STEP}V en ventana — 0/100`;
-  } else if (ess_post_std_factor === 0.0) {
-    ESS_post_score   = 0;
-    ESS_post_comment = `Señal demasiado ruidosa post-perturbación (std=${ess_post_std.toFixed(4)}, ${ess_post_std_ratio.toFixed(2)}× banda ±${ess_band_half.toFixed(3)}) — el sistema no está controlado — 0/100`;
   } else {
-    if (ess_post_err <= ess_tol_pct) {
-      ESS_post_score   = 100 * ess_post_std_factor;
-      ESS_post_comment = ess_post_std_factor < 1.0
-        ? `ESS ${ess_post_err.toFixed(3)}% en rango pero ruidoso (std=${ess_post_std.toFixed(4)}) — ${ESS_post_score.toFixed(1)}/100`
-        : `ESS ${ess_post_err.toFixed(3)}% dentro del rango (tol ${ess_tol_pct.toFixed(1)}%) — 100/100`;
+    ESS_post_score   = essScoreFromIAE(ess_post_iae);
+    if (ess_post_iae === 0) {
+      ESS_post_comment = `ESS post: suavizada siempre en banda ±${ess_tol_pct.toFixed(1)}% — 100/100`;
     } else {
-      const post_over = ess_post_err - ess_tol_pct;
-      const base = post_over <= ess_tol_pct
-        ? Math.max(0, 100 - post_over * (50 / ess_tol_pct))
-        : Math.max(0, 50  - (post_over - ess_tol_pct) * (50 / (2 * ess_tol_pct)));
-      ESS_post_score   = base * ess_post_std_factor;
-      ESS_post_comment = `ESS ${ess_post_err.toFixed(3)}% fuera del rango (tol ${ess_tol_pct.toFixed(1)}%, exceso ${post_over.toFixed(3)}%${ess_post_std_factor < 1.0 ? `, ruidoso std=${ess_post_std.toFixed(4)}` : ''}) — ${ESS_post_score.toFixed(1)}/100`;
+      ESS_post_comment = `ESS post: IAE_norm=${ess_post_iae.toFixed(3)}, ${ess_post_pct_out.toFixed(1)}% del tiempo fuera de banda (tol ±${ess_tol_pct.toFixed(1)}%) — ${ESS_post_score.toFixed(1)}/100`;
     }
   }
 
-  const ess_noise_pre  = ess_pre_std_ratio  > ESS_STD_WARN;
-  const ess_noise_post = ess_post_std_ratio > ESS_STD_WARN;
   const ess_step_warning: string | null =
     (ess_pre_step_bad || ess_post_step_bad)
       ? `Salto brusco entre muestras (> ${ESS_MAX_STEP}V) detectado${ess_pre_step_bad && ess_post_step_bad ? ' pre y post perturbación' : ess_pre_step_bad ? ' pre perturbación' : ' post perturbación'}. Verificá que el CSV no tenga datos corruptos.`
-    : (ess_noise_pre || ess_noise_post)
-      ? `Señal ruidosa en estado estable${ess_noise_pre && ess_noise_post ? ' pre y post perturbación' : ess_noise_pre ? ' pre perturbación' : ' post perturbación'}: ${ess_noise_pre ? `std_pre=${ess_pre_std.toFixed(4)} (${(ess_pre_std_ratio*100).toFixed(0)}% de la banda ±${ess_band_half.toFixed(3)})` : ''}${ess_noise_pre && ess_noise_post ? ' · ' : ''}${ess_noise_post ? `std_post=${ess_post_std.toFixed(4)} (${(ess_post_std_ratio*100).toFixed(0)}% de la banda ±${ess_band_half.toFixed(3)})` : ''}. El sistema parece no estar bien controlado (umbral: 60% de la banda).`
-    : null;
+      : null;
 
-  const ESS_score = (ESS_pre_score + ESS_post_score) / 2;
+  // ESS score = pre only (post is now part of Pert via ESS_pert)
+  const ESS_score = ESS_pre_score;
 
-  // ── Perturbation recovery (ESS error after golpe) ───────────────────────
-  const Pert_err_pct   = ess_post_err;
-  const pert_eval_time = time[ess_post_si];
+  // ── Perturbation recovery — IAE sobre suavizada, ventana pert_recovery_k_win
+  // Mismo principio que ESS: integra el exceso de la suavizada fuera de la banda
+  // pert_recovery_tol, normalizado contra (tol * T_win).
+  const pert_rec_start_i   = time.findIndex(t => t >= perturbation_start + perturbation_window);
+  const pert_rec_si        = pert_rec_start_i >= 0 ? pert_rec_start_i : n - 1;
+  const pert_rec_ei        = Math.min(n - 1, pert_rec_si + pert_recovery_k_win - 1);
+  const pert_rec_slice     = vel.slice(pert_rec_si, pert_rec_ei + 1);
+  const pert_rec_mean      = pert_rec_slice.length > 0
+    ? pert_rec_slice.reduce((a, b) => a + b, 0) / pert_rec_slice.length : ref;
+  const Pert_err_pct       = Math.abs(pert_rec_mean - ref) / ref * 100;
+  const pert_rec_band_abs  = pert_recovery_tol * ref;
+  const pert_eval_time     = time[pert_rec_si];
   const pert_eval_time_rel = pert_eval_time - perturbation_start;
+
+  // IAE sobre suavizada en ventana de recovery
+  const pert_rec_iae = (() => {
+    if (pert_rec_ei <= pert_rec_si) return 0;
+    const T_win = time[pert_rec_ei] - time[pert_rec_si];
+    if (T_win <= 0 || !isFinite(T_win)) return 0;
+    let area = 0;
+    for (let i = pert_rec_si; i <= pert_rec_ei; i++) {
+      const excess = Math.max(0, Math.abs(smoothed[i] - ref) - pert_rec_band_abs);
+      const dti    = i < pert_rec_ei ? time[i + 1] - time[i] : time[i] - time[i - 1];
+      area += excess * Math.abs(dti);
+    }
+    return area / (pert_rec_band_abs * T_win);
+  })();
+  const pert_rec_pct_out = (() => {
+    let out = 0;
+    for (let i = pert_rec_si; i <= pert_rec_ei; i++) {
+      if (Math.abs(smoothed[i] - ref) > pert_rec_band_abs) out++;
+    }
+    return pert_rec_ei > pert_rec_si
+      ? out / (pert_rec_ei - pert_rec_si + 1) * 100 : 0;
+  })();
+
+  const pert_rec_step_bad = hasExcessiveStep(pert_rec_slice);
   let Pert_recovery_score: number, Pert_recovery_comment: string;
-  if (Pert_err_pct <= 2) {
-    Pert_recovery_score   = 100;
-    Pert_recovery_comment = `Recovery: error ${Pert_err_pct.toFixed(3)}% en t+${pert_eval_time_rel.toFixed(3)}s — 100/100`;
+  if (pert_rec_step_bad) {
+    Pert_recovery_score   = 0;
+    Pert_recovery_comment = `Recovery inválido: salto > ${ESS_MAX_STEP}V en ventana — 0/100`;
   } else {
-    Pert_recovery_score   = Math.max(0, 100 - Pert_err_pct * 20);
-    Pert_recovery_comment = `Recovery: error ${Pert_err_pct.toFixed(3)}% en t+${pert_eval_time_rel.toFixed(3)}s — ${Pert_recovery_score.toFixed(1)}/100`;
+    Pert_recovery_score   = Math.max(0, 100 * (1 - pert_rec_iae));
+    if (pert_rec_iae === 0) {
+      Pert_recovery_comment = `Recovery: suavizada siempre en banda ±${(pert_recovery_tol*100).toFixed(1)}% desde t+${pert_eval_time_rel.toFixed(3)}s — 100/100`;
+    } else {
+      Pert_recovery_comment = `Recovery: IAE_norm=${pert_rec_iae.toFixed(3)}, ${pert_rec_pct_out.toFixed(1)}% del tiempo fuera de banda ±${(pert_recovery_tol*100).toFixed(1)}% desde t+${pert_eval_time_rel.toFixed(3)}s — ${Pert_recovery_score.toFixed(1)}/100`;
+    }
   }
 
   // ── Perturbation settling (fraction of smoothed signal in band after golpe) ──
@@ -481,9 +520,22 @@ export function analyzeResponse(
   const Pert_ST_score    = 100 * Pert_ST_prop_ok;
   const Pert_ST_comment  = `Settling post-pert: ${(Pert_ST_prop_ok*100).toFixed(0)}% en banda en ventana [t+${(pert_st_start_t - perturbation_start).toFixed(3)}s, t+${(pert_st_end_t - perturbation_start).toFixed(3)}s] — ${Pert_ST_score.toFixed(1)}/100`;
 
-  // Combined PERT = mean of recovery and settling
-  const Pert_score   = (Pert_recovery_score + Pert_ST_score) / 2;
-  const Pert_comment = `PERT combinado: recovery=${Pert_recovery_score.toFixed(1)} · settling=${Pert_ST_score.toFixed(1)} → ${Pert_score.toFixed(1)}/100`;
+  // ── ESS post-perturbation (IAE sobre suavizada, misma lógica que ESS pre/post)
+  // Ventana: pert_recovery_k_win muestras desde pert_end (misma que recovery window)
+  const pert_ess_iae     = isFinite(pert_rec_iae) ? pert_rec_iae : 0;
+  const pert_ess_pct_out = pert_rec_pct_out;
+  const Pert_ESS_score   = pert_rec_step_bad ? 0 : Math.max(0, 100 * (1 - pert_ess_iae));
+  const Pert_ESS_comment = pert_rec_step_bad
+    ? `ESS pert inválido: salto > ${ESS_MAX_STEP}V — 0/100`
+    : pert_ess_iae === 0
+      ? `ESS pert: suavizada en banda ±${(pert_recovery_tol*100).toFixed(1)}% — 100/100`
+      : `ESS pert: IAE_norm=${pert_ess_iae.toFixed(3)}, ${pert_ess_pct_out.toFixed(1)}% fuera ±${(pert_recovery_tol*100).toFixed(1)}% — ${Pert_ESS_score.toFixed(1)}/100`;
+
+  // Pert = detected(33%) + ST_pert(33%) + ESS_pert(33%)
+  // If no perturbation detected (pert_warning) → 0 for all three thirds
+  const pert_detected_score = 100;   // gets zeroed by pert_warning override below
+  const Pert_score   = (pert_detected_score + Pert_ST_score + Pert_ESS_score) / 3;
+  const Pert_comment = `PERT: detección=100 · settling=${Pert_ST_score.toFixed(1)} · ESS_pert=${Pert_ESS_score.toFixed(1)} → ${Pert_score.toFixed(1)}/100`;
 
   // ── Perturbation validation ───────────────────────────────────────────────
   const PERT_WIN        = 40;
@@ -534,14 +586,18 @@ export function analyzeResponse(
     OS_score: eff_OS_score, OS_comment, OS_val, OS_lim: os_hi, OS_iae,
     US_score: 100, US_comment, US_val, US_iae,  // US not graded
     ESS_pre_score: eff_ESS_pre_score, ESS_pre_comment, ESS_pre,
+    ESS_pre_iae: ess_pre_iae, ESS_pre_pct_out: ess_pre_pct_out,
     ESS_post_score: eff_ESS_post_score, ESS_post_comment, ESS_post,
+    ESS_post_iae: ess_post_iae, ESS_post_pct_out: ess_post_pct_out,
     ESS_score: eff_ESS_score,
     Pert_score: eff_Pert_score, Pert_comment, Pert_err_pct,
-    Pert_recovery_score: pert_warning ? 0 : Pert_recovery_score,
-    Pert_recovery_comment,
     Pert_ST_score: pert_warning ? 0 : Pert_ST_score,
     Pert_ST_comment,
     Pert_ST_prop_ok,
+    Pert_ESS_score: pert_warning ? 0 : Pert_ESS_score,
+    Pert_ESS_comment,
+    Pert_ESS_iae: pert_warning ? 0 : pert_ess_iae,
+    Pert_ESS_pct_out: pert_warning ? 0 : pert_ess_pct_out,
     final_score,
     rise_time,
     exp_start_warning,

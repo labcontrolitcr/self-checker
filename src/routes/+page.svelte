@@ -332,7 +332,7 @@
       ><div class="resize-grip"><span></span></div></div>
 
       <div class="stats-area">
-        <StatsPanel {result} config={cfg} domain={selectedDomain} />
+        <StatsPanel {result} config={cfg} domain={selectedDomain} {rows} csvRaw={cachedCSVText} csvFileName={cachedFileName} />
       </div>
     </section>
   {/if}

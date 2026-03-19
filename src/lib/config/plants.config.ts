@@ -25,6 +25,7 @@ export interface PlantConfig {
   perturbation_start: number;  // time (s) where perturbation begins
   perturbation_window: number; // duration (s) of perturbation event
   pert_recovery_k_win: number; // samples to average after perturbation_window ends
+  pert_recovery_tol: number;     // recovery tolerance (fraction, e.g. 0.02 = 2%) — same scoring logic as ess_tol
 
   // Scoring weights (must sum to 100)
   weights: {
@@ -37,7 +38,32 @@ export interface PlantConfig {
   y_limits: [number, number] | null;  // Y axis [min, max], null = auto
   domains: ('continuo' | 'discreto')[];
   exp_start_t: Partial<Record<'continuo' | 'discreto', number>>;  // experiment start time per domain (default 0)
+  chart_config?: Partial<ChartConfig>;  // optional per-plant visual overrides
 }
+
+export interface ChartConfig {
+  font_size: number;   // chart tick/label font size in px
+  raw:       string;   // raw signal line color
+  smoothed:  string;   // smoothed signal line color
+  ref:       string;   // reference horizontal line color
+  st_band:   string;   // settling time band lines color
+  os_lim:    string;   // overshoot limit line color
+  eval_win:  string;   // settling eval window region color
+  ess_win:   string;   // ESS window region color (pre + post)
+  pert_win:  string;   // perturbation window region color
+}
+
+export const DEFAULT_CHART_CONFIG: ChartConfig = {
+  font_size: 12,
+  raw:       '#c084fc',
+  smoothed:  '#b4328c',
+  ref:       '#3b82f6',
+  st_band:   '#3b82f6',
+  os_lim:    '#ef4444',
+  eval_win:  '#A0CCDA',
+  ess_win:   '#82A6B1',
+  pert_win:  '#C8AD55',
+};
 
 export const plants: PlantConfig[] = [
   {
@@ -57,6 +83,7 @@ export const plants: PlantConfig[] = [
     perturbation_start: 6.0,
     perturbation_window: 0.3,
     pert_recovery_k_win: 50,
+    pert_recovery_tol: 0.02,      // ±2% recovery tolerance
     weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
     y_limits: [3.8, 4.2],
     domains: ['continuo', 'discreto'],
@@ -79,6 +106,7 @@ export const plants: PlantConfig[] = [
     perturbation_start: 10.0,
     perturbation_window: 0.5,
     pert_recovery_k_win: 50,
+    pert_recovery_tol: 0.02,
     weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
     y_limits: null,
     domains: ['continuo', 'discreto'],
@@ -101,6 +129,7 @@ export const plants: PlantConfig[] = [
     perturbation_start: 8.0,
     perturbation_window: 0.3,
     pert_recovery_k_win: 50,
+    pert_recovery_tol: 0.02,
     weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
     y_limits: null,
     domains: ['continuo'],
@@ -123,6 +152,7 @@ export const plants: PlantConfig[] = [
     perturbation_start: 12.0,
     perturbation_window: 0.5,
     pert_recovery_k_win: 50,
+    pert_recovery_tol: 0.02,
     weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
     y_limits: null,
     domains: ['continuo', 'discreto'],

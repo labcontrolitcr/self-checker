@@ -65,17 +65,14 @@
   // Derived strings — always in sync with props, no stale capture
   const expStartStr = $derived(experimentStart.toFixed(3));
   const pertStartStr = $derived(perturbationStart.toFixed(3));
-  const pertWinStr = $derived(perturbationWindow.toFixed(3));
 
   // Local editable values — initialised from derived, user can type freely
   let localExpStart = $state('');
   let localStart = $state('');
-  let localWindow = $state('');
 
   // Sync local inputs when props change (e.g. plant reset)
   $effect(() => { localExpStart = expStartStr; });
   $effect(() => { localStart = pertStartStr; });
-  $effect(() => { localWindow = pertWinStr; });
 
   function commitExpStart(e: Event) {
     const val = parseFloat((e.target as HTMLInputElement).value);
@@ -98,15 +95,6 @@
     }
   }
 
-  function commitWindow(e: Event) {
-    const val = parseFloat((e.target as HTMLInputElement).value);
-    if (!isNaN(val) && val > 0) {
-      localWindow = val.toFixed(3);
-      onPerturbationChange(perturbationStart, val);
-    } else {
-      localWindow = perturbationWindow.toFixed(3);
-    }
-  }
 
   function onKeydown(handler: (e: Event) => void) {
     return (e: KeyboardEvent) => {
@@ -246,18 +234,7 @@
               onblur={commitStart}
               onkeydown={onKeydown(commitStart)}
             />
-            <label class="pert-label" for="pert-window">Ventana (s)</label>
-            <input
-              id="pert-window"
-              class="pert-input"
-              type="number"
-              step="0.01"
-              min="0.01"
-              value={localWindow}
-              oninput={(e) => localWindow = (e.target as HTMLInputElement).value}
-              onblur={commitWindow}
-              onkeydown={onKeydown(commitWindow)}
-            />
+
           </div>
         </div>
 
