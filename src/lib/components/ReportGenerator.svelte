@@ -16,18 +16,8 @@
   // Google Sheets Web App URL — deploy your Apps Script as web app and paste here
   // SHEETS_URL set below
 
-  // ── Read student name injected by TEC Digital via iframe src URL param ────
-  function getUrlUser(): string {
-    try {
-      const p = new URLSearchParams(window.location.search);
-      return p.get('user') ?? p.get('usuario') ?? p.get('nombre') ?? '';
-    } catch { return ''; }
-  }
-  const urlUser = getUrlUser();
-
   // ── State ──────────────────────────────────────────────────────────────────
   let open          = $state(false);
-  let generatorName = $state(urlUser);
   let teamName      = $state('');
   let generating    = $state(false);
   let errorMsg      = $state('');
@@ -346,16 +336,17 @@
       // ── Footer
       doc.setTextColor(150,150,150); doc.setFontSize(5.5);
       doc.text('Self Checker — IE TEC', M, PH - 2);
-      if (generatorName.trim())
-        doc.text('Generado por: ' + generatorName.trim(), PW - M, PH - 2, { align: 'right' });
+<<<<<<< HEAD
       // Serial centered — subtle, monospace, slightly smaller
+=======
+>>>>>>> 4dbaa6b (fix: remove generatorName (OpenACS no soporta variables en iframe), llave huérfana en ReportGenerator)
       doc.setFont('courier','normal'); doc.setFontSize(4.8); doc.setTextColor(175,175,175);
-      doc.text(serialCode, PW / 2, PH - 2, { align: 'center' });
+      doc.text(serialCode, PW - M, PH - 2, { align: 'right' });
 
       // Embed serial silently in PDF metadata (not visible in reader)
       (doc as any).setDocumentProperties?.({
         title:    'Self-Checker ' + config.label + ' ' + domain,
-        author:   generatorName.trim() || 'unknown',
+        author:   teamName.trim() || 'unknown',
         subject:  teamName.trim() || '—',
         keywords: serialCode,   // serial lives here — invisible to students
         creator:  'Self Checker IE TEC',
@@ -367,7 +358,7 @@
       // ── Log to Google Sheets ──────────────────────────────────────────────
       const logPayload = {
         timestamp:  new Date().toISOString(),
-        user:       urlUser.trim() || generatorName.trim() || '—',  // prefer TEC Digital name
+        user:       '—',
         team:       teamName.trim()      || '—',
         plant:      config.label,
         domain,
@@ -424,22 +415,6 @@
                 disabled={generating}>✕</button>
       </div>
 
-      <!-- Generator name — prominent block -->
-      <div class="generator-block">
-        <span class="block-label">GENERADO POR</span>
-        <input
-          class="field-input generator-input"
-          type="text"
-          bind:value={generatorName}
-          placeholder="Nombre del estudiante"
-          readonly={urlUser !== ''}
-        />
-        {#if urlUser !== ''}
-          <span class="tec-hint">Obtenido de TEC Digital</span>
-        {/if}
-      </div>
-
-      <div class="sep"></div>
 
       <!-- Team name -->
       <div class="field-row-wrap">
@@ -532,25 +507,6 @@
   }
   .close-btn:hover { color: var(--foreground, #eee); }
 
-  /* Generator block */
-  .generator-block {
-    display: flex; flex-direction: column; gap: 0.3rem;
-    background: var(--accent, #161616);
-    border: 1px solid var(--border, #2a2a2a);
-    border-radius: 4px; padding: 0.65rem 0.8rem;
-  }
-  .block-label {
-    font-size: 0.55rem; font-weight: 700; letter-spacing: 0.12em;
-    color: var(--muted-foreground, #555);
-  }
-  .generator-input {
-    font-size: 0.78rem !important; font-weight: 600 !important;
-    color: var(--foreground, #e5e5e5) !important;
-  }
-  .generator-input[readonly] { opacity: 0.65; cursor: default; }
-  .tec-hint {
-    font-size: 0.55rem; color: var(--muted-foreground, #444); font-style: italic;
-  }
 
   .sep { height: 1px; background: var(--border, #1e1e1e); }
 
