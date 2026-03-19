@@ -336,10 +336,6 @@
       // ── Footer
       doc.setTextColor(150,150,150); doc.setFontSize(5.5);
       doc.text('Self Checker — IE TEC', M, PH - 2);
-<<<<<<< HEAD
-      // Serial centered — subtle, monospace, slightly smaller
-=======
->>>>>>> 4dbaa6b (fix: remove generatorName (OpenACS no soporta variables en iframe), llave huérfana en ReportGenerator)
       doc.setFont('courier','normal'); doc.setFontSize(4.8); doc.setTextColor(175,175,175);
       doc.text(serialCode, PW - M, PH - 2, { align: 'right' });
 
