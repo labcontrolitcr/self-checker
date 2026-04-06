@@ -3,6 +3,7 @@
   import ResponseChart from '$lib/components/ResponseChart.svelte';
   import StatsPanel from '$lib/components/StatsPanel.svelte';
   import type { PlantConfig } from '$lib/config/plants.config';
+  import { resolveCsvCols, csvColsHint } from '$lib/config/plants.config';
   import { parseCSV, parseCSVHeaders, analyzeResponse } from '$lib/analysis';
   import type { AnalysisResult } from '$lib/analysis';
 
@@ -78,16 +79,17 @@
   function runAnalysis(timeCol: string, ctrlCol: string, csvText: string, plant: PlantConfig) {
     error = '';
     try {
+      const resolvedForRun = resolveCsvCols(plant.csv_cols, csvHeaders ?? []);
       const cfg = {
         ...plant,
         experiment_start: experimentStart,
         perturbation_start: perturbationStart,
         perturbation_window: perturbationWindow,
-        csv_cols: csvHeaders ?? plant.csv_cols,
+        csv_cols: csvHeaders ?? resolvedForRun.cols,
         time_col: timeCol,
         control_col: ctrlCol,
       };
-      const parsed = parseCSV(csvText, cfg.csv_cols);
+      const parsed = parseCSV(csvText, cfg.csv_cols as string[]);
       if (parsed.length < 10) throw new Error('Archivo muy corto o formato incorrecto.');
       rows = parsed;
       result = analyzeResponse(parsed, cfg);
@@ -205,7 +207,7 @@
         error = `No encontré la columna de tiempo (tiempo, t, k).`;
         return;
       }
-      csvHeaders         = selectedPlant.csv_cols;
+      csvHeaders         = resolveCsvCols(selectedPlant.csv_cols, []).cols;
       headersMatch       = true;
       selectedTimeCol    = selectedPlant.time_col;
       selectedControlCol = selectedPlant.control_col;
@@ -222,12 +224,12 @@
     }
     selectedTimeCol = timeCol;
 
-    const expected   = selectedPlant.csv_cols.map(c => c.toLowerCase());
-    const actual     = headers.map(h => h.toLowerCase());
-    headersMatch     = expected.every(ex => actual.includes(ex));
+    const { cols: resolvedCols, matched } = resolveCsvCols(selectedPlant.csv_cols, headers);
+    headersMatch = matched;
 
     if (headersMatch) {
       const ctrlCol = headers.find(h => h.toLowerCase() === selectedPlant!.control_col.toLowerCase())
+        ?? resolvedCols.find(c => c !== timeCol)
         ?? headers.find(h => h !== timeCol)
         ?? headers[0];
       selectedControlCol = ctrlCol;
@@ -270,7 +272,7 @@
       {perturbationStart}
       {perturbationWindow}
       {fileName}
-      csvColHint={selectedPlant ? selectedPlant.csv_cols.join(', ') : ''}
+      csvColHint={selectedPlant ? csvColsHint(selectedPlant.csv_cols) : ''}
       csvError={error}
       {csvReady}
       {showColSelector}
@@ -311,7 +313,7 @@
       experiment_start: experimentStart,
       perturbation_start: perturbationStart,
       perturbation_window: perturbationWindow,
-      csv_cols: csvHeaders ?? selectedPlant.csv_cols,
+      csv_cols: csvHeaders ?? resolveCsvCols(selectedPlant.csv_cols, []).cols,
       time_col: selectedTimeCol,
       control_col: selectedControlCol,
     }}

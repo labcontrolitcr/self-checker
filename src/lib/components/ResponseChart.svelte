@@ -42,7 +42,7 @@
     const c = { ...DEFAULT_CHART_CONFIG, ...(cfg.chart_config ?? {}) };
     return [
       { id: 'raw',      label: 'Señal raw',   color: c.raw,      visible: true, type: 'signal' as const },
-      { id: 'smoothed', label: 'Suavizado',    color: c.smoothed, visible: true, type: 'signal' as const },
+      ...(cfg.smooth !== false ? [{ id: 'smoothed', label: 'Suavizado', color: c.smoothed, visible: true, type: 'signal' as const }] : []),
       { id: 'ref',      label: 'Referencia',   color: c.ref,      visible: true, type: 'line'   as const },
       { id: 'st_band',  label: 'Banda ST',     color: c.st_band,  visible: true, type: 'line'   as const },
       { id: 'os_lim',   label: 'Límite OS',    color: c.os_lim,   visible: true, type: 'line'   as const },
@@ -60,18 +60,7 @@
   const vis  = $derived(Object.fromEntries(legendItems.map(i => [i.id, i.visible])));
   const col  = $derived(Object.fromEntries(legendItems.map(i => [i.id, i.color])));
 
-  // Derived: keep chart datasets in sync with legend
-  $effect(() => {
-    if (!chart) return;
-    const raw = chart.data.datasets[0];
-    const sm  = chart.data.datasets[1];
-    raw.borderColor = vis.raw
-      ? (vis.smoothed ? col.raw + '80' : col.raw)
-      : 'transparent';
-    sm.borderColor  = vis.smoothed ? col.smoothed : 'transparent';
-    sm.hidden       = !vis.smoothed;
-    chart.update('none');
-  });
+
   let xMin = $state('');
   let xMax = $state('');
   let yMin = $state('');
@@ -171,13 +160,15 @@
         label: { display: true, content: 'ST', position: 'end', color: 'rgba(34,197,94,0.9)', font: { family: 'Courier New', size: 9 } }
       };
     }
-    // ESS marker — start of the last-200-samples window used for evaluation
-    const ess_start_t = rows.length > 200 ? rows[rows.length - 200][config.time_col] : rows[0][config.time_col];
+    // ESS post marker — start of the post-pert ESS window (from result, not hardcoded)
+    const ess_post_start_t = result.ESS_post.k_start >= 0
+      ? (rows[result.ESS_post.k_start]?.[config.time_col] ?? perturbation_start + perturbation_window)
+      : perturbation_start + perturbation_window;
     ann['essMarker'] = {
       type: 'line',
-      xMin: ess_start_t, xMax: ess_start_t,
+      xMin: ess_post_start_t, xMax: ess_post_start_t,
       borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [2, 5],
-      label: { display: true, content: 'ESS-pre', position: 'start', color: 'rgba(34,197,94,0.65)', font: { family: 'Courier New', size: 8 } }
+      label: { display: true, content: 'ESS-post', position: 'start', color: 'rgba(34,197,94,0.65)', font: { family: 'Courier New', size: 8 } }
     };
     return ann;
   }
@@ -213,7 +204,9 @@
         datasets: [{
           label: config.control_col,
           data: vel,
-          borderColor: legendItems.find(i => i.id === 'smoothed')?.visible ? legendItems.find(i => i.id === 'raw')?.color + '80' : legendItems.find(i => i.id === 'raw')?.color ?? '#c084fc',
+          borderColor: (legendItems.find(i => i.id === 'smoothed')?.visible)
+            ? (legendItems.find(i => i.id === 'raw')?.color ?? '#c084fc') + '80'
+            : (legendItems.find(i => i.id === 'raw')?.color ?? '#c084fc'),
           borderWidth: 1.5,
           pointRadius: 0,
           tension: 0,
@@ -226,7 +219,7 @@
           pointRadius: 0,
           tension: 0,
           fill: false,
-          hidden: !(legendItems.find(i => i.id === 'smoothed')?.visible ?? true),
+          hidden: !(legendItems.find(i => i.id === 'smoothed')?.visible ?? false),
           parsing: false,
         }]
       },
@@ -280,7 +273,7 @@
     });
   }
 
-  // Hot-update annotations when config, result, legend, or font changes
+  // Hot-update annotations + dataset visibility/color when config, result, legend, or font changes
   $effect(() => {
     const _ps  = config.perturbation_start;
     const _pw  = config.perturbation_window;
@@ -293,6 +286,18 @@
       // update axis font sizes
       chart.options.scales.x.ticks.font.size = chartFontSize;
       chart.options.scales.y.ticks.font.size = chartFontSize;
+      // sync dataset visibility and colors with legend toggles
+      if (chart.data.datasets[0]) {
+        chart.data.datasets[0].hidden      = !(vis.raw ?? true);
+        chart.data.datasets[0].borderColor = vis.smoothed
+          ? (col.raw ?? '#c084fc') + '80'
+          : (col.raw ?? '#c084fc');
+      }
+      if (chart.data.datasets[1]) {
+        // hidden when smooth=false (no smoothed item in legend) or toggled off
+        chart.data.datasets[1].hidden      = !(vis.smoothed ?? false);
+        chart.data.datasets[1].borderColor = col.smoothed ?? '#b4328c';
+      }
       chart.update('none');
     }
   });
@@ -384,10 +389,12 @@
     document.removeEventListener('click', handleOutsideClick);
   });
 
-  // Full rebuild only when rows or domain change
+  // Full rebuild when rows, domain, or plant changes
   $effect(() => {
-    const _r = rows.length;
-    const _d = domain;
+    const _r  = rows.length;
+    const _d  = domain;
+    const _id = config.id;
+    const _sm = config.smooth;  // re-seed legend when smooth flag changes (shows/hides smoothed item)
     // Re-seed colors and font size from new plant config on rebuild
     legendItems = makeLegendItems(config);
     chartFontSize = { ...DEFAULT_CHART_CONFIG, ...(config.chart_config ?? {}) }.font_size;

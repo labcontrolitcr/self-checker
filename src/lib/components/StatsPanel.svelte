@@ -105,34 +105,15 @@
         <td class="{scoreClass(result.OS_score)}">{fmt(result.OS_score, 1)}</td>
       </tr>
 
-      <!-- ESS pre -->
+      <!-- ESS pre (único, peso completo) -->
       <tr>
-        <td class="crit-name">ESS<br/>PRE-PERT</td>
+        <td class="crit-name">ESS</td>
         <td>
           IAE  = {fmt(r.ESS_pre_iae ?? 0, 3)} (norm)<br />
           fuera = {fmt(r.ESS_pre_pct_out ?? 0, 1)}% del tiempo<br />
           mean = {fmt(result.ESS_pre.mean)} · err={fmt(result.ESS_pre.error_pct, 3)}%<br />
-          <span class="sub-detail">win={config.ess_k_win} muestras · suavizada · peso {config.weights.ESS/2}%</span>
+          <span class="sub-detail">últimas {config.ess_k_win} muestras pre-pert · suavizada · peso {config.weights.ESS}%</span>
         </td>
-        <td class="{scoreClass(result.ESS_pre_score)}">{fmt(result.ESS_pre_score, 1)}</td>
-      </tr>
-
-      <!-- ESS post -->
-      <tr>
-        <td class="crit-name">ESS<br/>POST-PERT</td>
-        <td>
-          IAE  = {fmt(r.ESS_post_iae ?? 0, 3)} (norm)<br />
-          fuera = {fmt(r.ESS_post_pct_out ?? 0, 1)}% del tiempo<br />
-          mean = {fmt(result.ESS_post.mean)} · err={fmt(result.ESS_post.error_pct, 3)}%<br />
-          <span class="sub-detail">últimas {config.ess_k_win} muestras · suavizada · peso {config.weights.ESS/2}%</span>
-        </td>
-        <td class="{scoreClass(result.ESS_post_score)}">{fmt(result.ESS_post_score, 1)}</td>
-      </tr>
-
-      <!-- ESS combined -->
-      <tr class="combined-row">
-        <td class="crit-name">ESS<br/>COMBINADO</td>
-        <td>media(pre, post) · peso {config.weights.ESS}%</td>
         <td class="{scoreClass(result.ESS_score)}">{fmt(result.ESS_score, 1)}</td>
       </tr>
 
@@ -149,21 +130,22 @@
         <td class="{scoreClass(r.Pert_ST_score ?? 0)}">{fmt(r.Pert_ST_score ?? 0, 1)}</td>
       </tr>
 
-      <!-- Perturbation ESS -->
+      <!-- ESS post — va dentro de PERT -->
       <tr>
         <td class="crit-name">PERT<br/>ESS</td>
         <td>
-          IAE  = {fmt(r.Pert_ESS_iae ?? 0, 3)} (norm)<br />
-          fuera = {fmt(r.Pert_ESS_pct_out ?? 0, 1)}% del tiempo<br />
-          <span class="sub-detail">tol={(config as any).pert_recovery_tol !== undefined ? ((config as any).pert_recovery_tol*100).toFixed(1) : "2.0"}% · 1/3 del peso · suavizada</span>
+          IAE  = {fmt(r.ESS_post_iae ?? 0, 3)} (norm)<br />
+          fuera = {fmt(r.ESS_post_pct_out ?? 0, 1)}% del tiempo<br />
+          mean = {fmt(result.ESS_post.mean)} · err={fmt(result.ESS_post.error_pct, 3)}%<br />
+          <span class="sub-detail">últimas {config.ess_k_win} muestras (ventana post-pert) · 1/3 del peso PERT</span>
         </td>
-        <td class="{scoreClass(r.Pert_ESS_score ?? 0)}">{fmt(r.Pert_ESS_score ?? 0, 1)}</td>
+        <td class="{scoreClass(result.ESS_post_score)}">{fmt(result.ESS_post_score, 1)}</td>
       </tr>
 
       <!-- Perturbation combined -->
       <tr class="combined-row">
         <td class="crit-name">PERT<br/>COMBINADO</td>
-        <td>(detectada + settling + ESS_pert) / 3 · peso {config.weights.Pert}%</td>
+        <td>(detectada + settling + ESS_post) / 3 · peso {config.weights.Pert}%</td>
         <td class="{scoreClass(result.Pert_score)}">{fmt(result.Pert_score, 1)}</td>
       </tr>
 

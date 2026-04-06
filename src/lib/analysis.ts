@@ -169,6 +169,10 @@ export function analyzeResponse(
     ref, tol_st, t_obj, t_win, tol_os, ess_tol, ess_k_win,
     perturbation_start, perturbation_window, pert_recovery_k_win, pert_recovery_tol,
     weights,
+    smooth = true,
+    st_proportion_only = false,
+    pert_zscore_min = 3,
+    pert_detect_win = 40,
     experiment_start = 0,
   } = config;
 
@@ -189,8 +193,9 @@ export function analyzeResponse(
   const n  = vel.length;
   const dt = n > 1 ? (time[n - 1] - time[0]) / (n - 1) : 0.005;
 
-  // ── Adaptive MA smoothed signal ───────────────────────────────────────────
-  const { smoothed, winSize: ma_window } = adaptiveMA(vel, dt);
+  // ── Adaptive MA smoothed signal (skipped if smooth=false) ───────────────
+  const { smoothed: _smoothed, winSize: ma_window } = adaptiveMA(vel, dt);
+  const smoothed = smooth ? _smoothed : vel;
 
   // ── Experiment start validation ───────────────────────────────────────────
   const EXP_START_WIN      = 10;
@@ -225,16 +230,17 @@ export function analyzeResponse(
 
   const pert_start_for_st = nearestIdx(time, perturbation_start);
 
-  // ── ST real: last entry into band on smoothed signal ─────────────────────
-  // Find the LAST time the smoothed signal crosses into the band and stays.
-  // "Stays" = MA never exits the band again before perturbation.
-  // Algorithm: scan forward, track last_entry_idx each time MA re-enters band.
+  // ── ST real: first stable entry into band, scanned up to t_obj+t_win only ──
+  // Scanning limit is always t_obj+t_win — independent of perturbation_start
+  // so moving the perturbation doesn't affect the ST score.
   const ST_MA_WIN    = 10;
   const ST_MA_CONSEC = 40;
+  const st_scan_end  = time.findIndex(t => t >= t_obj + t_win);
+  const st_scan_limit = st_scan_end >= 0 ? st_scan_end : n;
 
   let st_stable_idx: number | null = null;
   let st_consec = 0;
-  for (let i = ST_MA_WIN; i < pert_start_for_st; i++) {
+  for (let i = ST_MA_WIN; i < st_scan_limit; i++) {
     const ma = smoothed[i];
     if (ma >= st_lo && ma <= st_hi) {
       st_consec++;
@@ -246,13 +252,12 @@ export function analyzeResponse(
     }
   }
 
-  // Real ST: scan from st_stable_idx forward, find LAST exit+reentry before perturbation
-  // (if the smoothed signal leaves the band and comes back, the real ST is that last reentry)
+  // Real ST: scan from st_stable_idx forward within t_obj+t_win, find LAST exit+reentry
   let real_st_idx = st_stable_idx;
   if (st_stable_idx !== null) {
     let last_exit_reentry: number | null = null;
     let in_band = true;
-    for (let i = st_stable_idx + 1; i < pert_start_for_st; i++) {
+    for (let i = st_stable_idx + 1; i < st_scan_limit; i++) {
       const ma = smoothed[i];
       const now_in = ma >= st_lo && ma <= st_hi;
       if (in_band && !now_in) {
@@ -265,23 +270,51 @@ export function analyzeResponse(
     if (last_exit_reentry !== null) real_st_idx = last_exit_reentry;
   }
 
-  const t_obj_idx      = time.findIndex(t => t >= t_obj);
-  const st_eval_start  = real_st_idx !== null
-    ? Math.max(t_obj_idx >= 0 ? t_obj_idx : 0, real_st_idx)
-    : (t_obj_idx >= 0 ? t_obj_idx : 0);
+  const t_obj_idx     = time.findIndex(t => t >= t_obj);
 
-  const idx_win  = time.reduce<number[]>((acc, t, i) => {
-    if (i >= st_eval_start && t <= t_obj + t_win) acc.push(i);
+  // ── ST score ──────────────────────────────────────────────────────────────
+  // Primary: linear scale based on when signal enters band relative to t_obj/t_win
+  //   t_st <= t_obj              → 100
+  //   t_st in (t_obj, t_obj+t_win] → linear 100→0
+  //   t_st > t_obj+t_win or null → 0  (fallback: proportion in band)
+  let ST_score: number;
+  let ST_comment: string;
+  if (!st_proportion_only && real_st_idx !== null) {
+    const t_st = time[real_st_idx] - experiment_start;
+    if (t_st <= t_obj) {
+      ST_score   = 100;
+      ST_comment = `T_st=${t_st.toFixed(3)}s ≤ t_obj=${t_obj}s → 100/100`;
+    } else if (t_st <= t_obj + t_win) {
+      const frac = (t_st - t_obj) / t_win;   // 0 at t_obj, 1 at t_obj+t_win
+      ST_score   = Math.round((1 - frac) * 100);
+      ST_comment = `T_st=${t_st.toFixed(3)}s en (${t_obj}s, ${t_obj+t_win}s] → ${ST_score.toFixed(1)}/100`;
+    } else {
+      ST_score   = 0;
+      ST_comment = `T_st=${t_st.toFixed(3)}s > t_obj+t_win=${t_obj+t_win}s → 0/100`;
+    }
+  } else {
+    // Fallback (st_proportion_only or no stable entry found): proportion of samples in band
+    const fb_start = t_obj_idx >= 0 ? t_obj_idx : 0;
+    const fb_win   = time.reduce<number[]>((acc, t, i) => {
+      if (i >= fb_start && t <= t_obj + t_win) acc.push(i);
+      return acc;
+    }, []);
+    const fb_check = fb_win.map(i => smoothed[i]);
+    const prop_ok  = fb_check.length > 0
+      ? fb_check.filter(v => v >= st_lo && v <= st_hi).length / fb_check.length : 0;
+    ST_score   = Math.round(100 * prop_ok);
+    ST_comment = `Fallback proporción: ${(prop_ok*100).toFixed(0)}% en banda [${t_obj}s, ${t_obj+t_win}s] → ${ST_score.toFixed(1)}/100`;
+  }
+
+  // ST_prop_ok — proportion in [t_obj, t_obj+t_win] for informational purposes
+  const st_prop_fb_start = t_obj_idx >= 0 ? t_obj_idx : 0;
+  const st_prop_fb_win   = time.reduce<number[]>((acc, t, i) => {
+    if (i >= st_prop_fb_start && t <= t_obj + t_win) acc.push(i);
     return acc;
   }, []);
-  const y_check  = idx_win.map(i => smoothed[i]);
-  const prop_ok  = y_check.length > 0
-    ? y_check.filter(v => v >= st_lo && v <= st_hi).length / y_check.length : 0;
-
-  const st_eval_t      = real_st_idx !== null ? time[st_eval_start] : t_obj;
-  const st_eval_t_rel  = st_eval_t - experiment_start;  // relative to exp start
-  const ST_score   = 100 * prop_ok;
-  const ST_comment = `${(prop_ok*100).toFixed(0)}% de muestras en banda [${st_lo.toFixed(3)}, ${st_hi.toFixed(3)}] desde t=${st_eval_t_rel.toFixed(3)}s — ${ST_score.toFixed(1)}/100`;
+  const st_prop_fb_check = st_prop_fb_win.map(i => smoothed[i]);
+  const ST_prop_ok = st_prop_fb_check.length > 0
+    ? st_prop_fb_check.filter(v => v >= st_lo && v <= st_hi).length / st_prop_fb_check.length : 0;
 
   // settling_time_actual = first raw sample in band (informational marker)
   let settling_time_actual: number | null = null;
@@ -310,25 +343,35 @@ export function analyzeResponse(
     return 0;
   }
 
+  // OS/US search limited to transient [0, t_obj + t_obj/2] — gives margin for slow systems
+  const os_scan_end_t = t_obj + t_obj / 2;
+  const os_scan_end_i = time.findIndex(t => t >= os_scan_end_t);
+  // Fallback chain: t_obj+t_obj/2 → pert_start_for_st. Must be > 0 to avoid empty slice.
+  const os_scan_end   = os_scan_end_i > 0
+    ? os_scan_end_i
+    : pert_start_for_st > 0
+      ? pert_start_for_st
+      : n;
+
   // First raw entry into ST band — US only valid after signal arrives
-  let first_in_band_idx = pert_start_for_st - 1;
-  for (let i = 0; i < pert_start_for_st; i++) {
+  let first_in_band_idx = os_scan_end - 1;
+  for (let i = 0; i < os_scan_end; i++) {
     if (vel[i] >= st_lo && vel[i] <= st_hi) { first_in_band_idx = i; break; }
   }
 
-  // OS: peak of smoothed from start → pert_start (full pre-pert transient)
-  const OS_val     = smoothed.slice(0, pert_start_for_st).reduce((m, v) => v > m ? v : m, -Infinity);
+  // OS: peak of smoothed in transient [0, t_obj]
+  const OS_val     = smoothed.slice(0, os_scan_end).reduce((m, v) => v > m ? v : m, -Infinity);
   const OS_pct     = Math.max(0, (OS_val - ref) / ref);
   const OS_score   = osScore(OS_pct);
   const OS_iae     = 0;  // kept for interface compatibility
 
   // US not graded — keep val for possible future use
-  const US_val    = smoothed.slice(first_in_band_idx, pert_start_for_st).reduce((m, v) => v < m ? v : m, Infinity);
+  const US_val    = smoothed.slice(first_in_band_idx, os_scan_end).reduce((m, v) => v < m ? v : m, Infinity);
   const US_iae    = 0;
   const US_comment = '';
 
   const OS_comment = OS_pct < 0.001
-    ? `OS: sin sobreimpulso (pico ${OS_val.toFixed(4)}) — ${OS_score.toFixed(1)}/100`
+    ? `OS: sin sobreimpulso (pico ${isFinite(OS_val) ? OS_val.toFixed(4) : ref.toFixed(4)}) — ${OS_score.toFixed(1)}/100`
     : OS_pct <= tol_os
       ? `OS: ${(OS_pct*100).toFixed(2)}% < ${(tol_os*100).toFixed(1)}% — dentro del límite — ${OS_score.toFixed(1)}/100`
       : `OS: ${(OS_pct*100).toFixed(2)}% de sobreimpulso — excede límite ${(tol_os*100).toFixed(1)}% (exceso ${((OS_pct - tol_os)*100).toFixed(2)}%) — ${OS_score.toFixed(1)}/100`;
@@ -412,9 +455,14 @@ export function analyzeResponse(
     }
   }
 
-  // ── ESS post — symmetric, últimas ess_k_win muestras del experimento ──────
+  // ── ESS post — últimas ess_k_win muestras de la ventana post-perturbación ──
+  // Window starts at perturbation_start + perturbation_window (recovery end)
+  const ess_post_win_start_i = time.findIndex(t => t >= perturbation_start + perturbation_window);
   const ess_post_ei    = n - 1;
-  const ess_post_si    = Math.max(0, ess_post_ei - ess_k_win + 1);
+  const ess_post_si    = Math.max(
+    ess_post_win_start_i >= 0 ? ess_post_win_start_i : 0,
+    ess_post_ei - ess_k_win + 1
+  );
   const ess_post_slice = vel.slice(ess_post_si, ess_post_ei + 1);
   const ess_post_mean  = ess_post_slice.length > 0
     ? ess_post_slice.reduce((a, b) => a + b, 0) / ess_post_slice.length : ref;
@@ -531,16 +579,14 @@ export function analyzeResponse(
       ? `ESS pert: suavizada en banda ±${(pert_recovery_tol*100).toFixed(1)}% — 100/100`
       : `ESS pert: IAE_norm=${pert_ess_iae.toFixed(3)}, ${pert_ess_pct_out.toFixed(1)}% fuera ±${(pert_recovery_tol*100).toFixed(1)}% — ${Pert_ESS_score.toFixed(1)}/100`;
 
-  // Pert = detected(33%) + ST_pert(33%) + ESS_pert(33%)
-  // If no perturbation detected (pert_warning) → 0 for all three thirds
-  const pert_detected_score = 100;   // gets zeroed by pert_warning override below
-  const Pert_score   = (pert_detected_score + Pert_ST_score + Pert_ESS_score) / 3;
-  const Pert_comment = `PERT: detección=100 · settling=${Pert_ST_score.toFixed(1)} · ESS_pert=${Pert_ESS_score.toFixed(1)} → ${Pert_score.toFixed(1)}/100`;
+  // Pert_score se calcula DESPUÉS de la validación (ver abajo)
+  // placeholder — se sobreescribe tras pert_warning
+  const _pert_placeholder = 0;
 
   // ── Perturbation validation ───────────────────────────────────────────────
-  const PERT_WIN        = 40;
+  const PERT_WIN        = pert_detect_win;
   const PERT_PRE_TOL    = 0.10;
-  const PERT_ZSCORE_MIN = 3;
+  const PERT_ZSCORE_MIN = pert_zscore_min;
   const pert_start_idx  = nearestIdx(time, perturbation_start);
   const pert_pre_start  = Math.max(0, pert_start_idx - PERT_WIN);
   const pert_preSlice   = vel.slice(pert_pre_start, pert_start_idx);
@@ -556,19 +602,41 @@ export function analyzeResponse(
   const PERT_MIN_SHIFT_PCT = 0.10;
   const pert_shift      = Math.abs(pert_postMean - pert_preMean);
   const pert_shift_pct  = pert_shift / ref;
-  const pert_zScore     = pert_preStd > 0
+
+  // For oscillatory signals, mean shift ≈ 0 even with real perturbation.
+  // Use the larger of: (a) mean-based z-score, (b) std-ratio z-score
+  // std-ratio: how many pre-std's does the post-std exceed the pre-std by?
+  const pert_postStd    = pert_postSlice.length > 1
+    ? Math.sqrt(pert_postSlice.reduce((acc, v) => acc + (v - pert_postMean) ** 2, 0) / (pert_postSlice.length - 1)) : 0;
+  const pert_stdRatio   = pert_preStd > 0 ? pert_postStd / pert_preStd : 1;
+  // z-score from mean shift
+  const pert_zScore_mean = pert_preStd > 0
     ? pert_shift / pert_preStd
     : (pert_shift_pct >= PERT_MIN_SHIFT_PCT ? Infinity : 0);
+  // z-score from std amplification (stdRatio - 1 in units of pre-std, scaled to be comparable)
+  const pert_zScore_std  = pert_stdRatio - 1;  // 0 = no change, 1 = doubled, etc.
+  const pert_zScore      = Math.max(pert_zScore_mean, pert_zScore_std);
 
   let pert_warning: string | null = null;
   if (pert_preErr_pct > PERT_PRE_TOL * 100) {
     pert_warning = `Las ${pert_preSlice.length} muestras antes de la perturbación promedian ${pert_preMean.toFixed(4)} (error ${pert_preErr_pct.toFixed(1)}% respecto a la referencia). El sistema debe estar en estado estable antes de la perturbación.`;
   } else if (pert_zScore < PERT_ZSCORE_MIN) {
     const detail = pert_preStd > 0
-      ? `desplazamiento: ${pert_zScore.toFixed(1)}σ, se esperaba > ${PERT_ZSCORE_MIN}σ`
+      ? `desplazamiento: z=${pert_zScore.toFixed(2)} (shift=${pert_zScore_mean.toFixed(2)}σ, amp_ratio=${pert_stdRatio.toFixed(2)}x), se esperaba > ${PERT_ZSCORE_MIN}`
       : `desplazamiento: ${(pert_shift_pct * 100).toFixed(1)}% de la referencia, se esperaba > ${(PERT_MIN_SHIFT_PCT * 100).toFixed(0)}%`;
     pert_warning = `No se detecta una perturbación significativa (${detail}). Verificá el tiempo de inicio.`;
   }
+
+  // ── Pert score: detección(33%) + settling(33%) + ESS_pert(33%) ──────────
+  // Si no se detecta → solo el tercio de detección es 0, settling y ESS se mantienen
+  // Pert_score: 0 si no detectada (sin sentido calificar settling/ESS sin perturbación real)
+  // Si detectada: (100 + Pert_ST + ESS_post) / 3 — cada componente 33.33%
+  const Pert_score   = pert_warning
+    ? 0
+    : (100 + Pert_ST_score + ESS_post_score) / 3;
+  const Pert_comment = pert_warning
+    ? `PERT: no detectada → 0/100`
+    : `PERT: detección=100 · settling=${Pert_ST_score.toFixed(1)} · ESS_post=${ESS_post_score.toFixed(1)} → ${Pert_score.toFixed(1)}/100`;
 
   // ── Score overrides ───────────────────────────────────────────────────────
   const eff_ST_score       = exp_start_warning ? 0 : ST_score;
@@ -576,13 +644,13 @@ export function analyzeResponse(
   const eff_ESS_pre_score  = exp_start_warning ? 0 : ESS_pre_score;
   const eff_ESS_post_score = exp_start_warning ? 0 : ESS_post_score;
   const eff_ESS_score      = exp_start_warning ? 0 : ESS_score;
-  const eff_Pert_score     = pert_warning       ? 0 : Pert_score;
+  const eff_Pert_score     = exp_start_warning ? 0 : Pert_score;
 
   const final_score =
     (eff_ST_score * weights.ST + eff_OS_score * weights.OS + eff_ESS_score * weights.ESS + eff_Pert_score * weights.Pert) / 100;
 
   return {
-    ST_score: eff_ST_score, ST_comment, ST_prop_ok: prop_ok, settling_time_actual,
+    ST_score: eff_ST_score, ST_comment, ST_prop_ok, settling_time_actual,
     OS_score: eff_OS_score, OS_comment, OS_val, OS_lim: os_hi, OS_iae,
     US_score: 100, US_comment, US_val, US_iae,  // US not graded
     ESS_pre_score: eff_ESS_pre_score, ESS_pre_comment, ESS_pre,

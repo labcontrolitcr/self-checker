@@ -161,8 +161,8 @@
       data: {
         labels: tSl,
         datasets: [
-          { label: ctrl, data: rawSl, borderColor: 'rgba(130,60,200,0.30)', borderWidth: 1.5 * SF, pointRadius: 0, tension: 0 },
-          { label: 'sm', data: smSl,  borderColor: 'rgba(120,20,100,0.85)', borderWidth: 2.5 * SF, pointRadius: 0, tension: 0 },
+          { label: ctrl, data: rawSl, borderColor: config.smooth !== false ? 'rgba(130,60,200,0.30)' : 'rgba(130,60,200,0.85)', borderWidth: 1.5 * SF, pointRadius: 0, tension: 0 },
+          { label: 'sm', data: smSl,  borderColor: config.smooth !== false ? 'rgba(120,20,100,0.85)' : 'transparent',              borderWidth: 2.5 * SF, pointRadius: 0, tension: 0 },
         ]
       },
       options: {
