@@ -229,7 +229,7 @@ export const plants: PlantConfig[] = [
     smooth: false,
     st_proportion_only: true, // señal oscilatoria — evaluar proporción en banda directo sin buscar real_st_idx
     y_limits: [0.5, 0.7],
-    domains: ['continuo'],
+    domains: ['continuo', 'discreto'],
     exp_start_t: {},
   },
   {
