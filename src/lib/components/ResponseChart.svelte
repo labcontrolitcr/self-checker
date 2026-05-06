@@ -11,9 +11,10 @@
     result: AnalysisResult;
     domain: 'continuo' | 'discreto';
     chartHeight?: number;
+    constraintBands?: { limit: number; zero: number };  // constraint mode: ±limit = safe, ±zero = danger
   }
 
-  let { rows, config, result, domain, chartHeight = 400 }: Props = $props();
+  let { rows, config, result, domain, chartHeight = 400, constraintBands }: Props = $props();
 
   // Compute sampling time from first two timestamps
   const samplingTime = $derived.by(() => {
@@ -84,7 +85,40 @@
       return `rgba(${r},${g},${b},${a})`;
     }
 
-    const ann: Record<string, any> = {
+    const ann: Record<string, any> = constraintBands ? {
+      // ── Constraint mode: ±limit = safe zone boundary, ±zero = danger zone ──
+      // Danger zones: above +limit and below -limit (shaded red)
+      dangerHi: {
+        type: 'box',
+        yMin: constraintBands.limit,
+        yMax: config.y_limits ? config.y_limits[1] : constraintBands.zero * 1.5,
+        backgroundColor: rgba(col.os_lim, 0.10), borderWidth: 0,
+      },
+      dangerLo: {
+        type: 'box',
+        yMin: config.y_limits ? config.y_limits[0] : -constraintBands.zero * 1.5,
+        yMax: -constraintBands.limit,
+        backgroundColor: rgba(col.os_lim, 0.10), borderWidth: 0,
+      },
+      // Limit lines ±limit
+      limitHi: {
+        type: 'line', yMin: constraintBands.limit, yMax: constraintBands.limit,
+        borderColor: rgba(col.os_lim, 0.85), borderWidth: 1.5, borderDash: [6, 3],
+        label: { display: true, content: `+${constraintBands.limit.toFixed(4)}`, position: 'start', color: rgba(col.os_lim, 0.9), font: { family: 'Courier New', size: fs - 1 } }
+      },
+      limitLo: {
+        type: 'line', yMin: -constraintBands.limit, yMax: -constraintBands.limit,
+        borderColor: rgba(col.os_lim, 0.85), borderWidth: 1.5, borderDash: [6, 3],
+        label: { display: true, content: `-${constraintBands.limit.toFixed(4)}`, position: 'start', color: rgba(col.os_lim, 0.9), font: { family: 'Courier New', size: fs - 1 } }
+      },
+      // Zero reference line
+      refLine: {
+        type: 'line', yMin: 0, yMax: 0,
+        borderColor: rgba(col.ref, 0.5), borderWidth: 1, borderDash: [4, 4],
+        label: { display: false, content: '0' }
+      },
+    } : {
+      // ── Normal mode ───────────────────────────────────────────────────────
       refLine: {
         type: 'line', yMin: ref, yMax: ref,
         borderColor: vis.ref ? rgba(col.ref, 0.8) : 'transparent', borderWidth: 1.5, borderDash: [4, 4],
@@ -153,23 +187,26 @@
       },
     };
 
-    if (result.settling_time_actual !== null) {
-      ann['stActual'] = {
-        type: 'line', xMin: result.settling_time_actual, xMax: result.settling_time_actual,
-        borderColor: 'rgba(34,197,94,0.7)', borderWidth: 1.5, borderDash: [3, 3],
-        label: { display: true, content: 'ST', position: 'end', color: 'rgba(34,197,94,0.9)', font: { family: 'Courier New', size: 9 } }
+    // In constraint mode, skip ST/ESS markers (not meaningful for constraint variable)
+    if (!constraintBands) {
+      if (result.settling_time_actual !== null) {
+        ann['stActual'] = {
+          type: 'line', xMin: result.settling_time_actual, xMax: result.settling_time_actual,
+          borderColor: 'rgba(34,197,94,0.7)', borderWidth: 1.5, borderDash: [3, 3],
+          label: { display: true, content: 'ST', position: 'end', color: 'rgba(34,197,94,0.9)', font: { family: 'Courier New', size: 9 } }
+        };
+      }
+      // ESS post marker — start of the post-pert ESS window (from result, not hardcoded)
+      const ess_post_start_t = result.ESS_post.k_start >= 0
+        ? (rows[result.ESS_post.k_start]?.[config.time_col] ?? perturbation_start + perturbation_window)
+        : perturbation_start + perturbation_window;
+      ann['essMarker'] = {
+        type: 'line',
+        xMin: ess_post_start_t, xMax: ess_post_start_t,
+        borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [2, 5],
+        label: { display: true, content: 'ESS-post', position: 'start', color: 'rgba(34,197,94,0.65)', font: { family: 'Courier New', size: 8 } }
       };
     }
-    // ESS post marker — start of the post-pert ESS window (from result, not hardcoded)
-    const ess_post_start_t = result.ESS_post.k_start >= 0
-      ? (rows[result.ESS_post.k_start]?.[config.time_col] ?? perturbation_start + perturbation_window)
-      : perturbation_start + perturbation_window;
-    ann['essMarker'] = {
-      type: 'line',
-      xMin: ess_post_start_t, xMax: ess_post_start_t,
-      borderColor: 'rgba(34,197,94,0.45)', borderWidth: 1, borderDash: [2, 5],
-      label: { display: true, content: 'ESS-post', position: 'start', color: 'rgba(34,197,94,0.65)', font: { family: 'Courier New', size: 8 } }
-    };
     return ann;
   }
 

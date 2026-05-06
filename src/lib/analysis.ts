@@ -1,5 +1,63 @@
 import type { PlantConfig } from '$lib/config/plants.config';
 
+// ── Constraint analysis (secondary variable that must stay within a limit) ──
+export interface ConstraintResult {
+  max_abs_val: number;      // maximum absolute value in the signal (after experiment start)
+  max_abs_unit: string;     // for display (e.g. 'rad', left to caller)
+  constraint_limit: number; // threshold for score=100
+  constraint_zero: number;  // threshold for score=0
+  score: number;            // 0–100 linear
+  comment: string;
+}
+
+export function analyzeConstraint(
+  rows: Record<string, number>[],
+  col: string,
+  time_col: string,
+  experiment_start: number,
+  perturbation_start: number,
+  constraint_limit: number,
+  constraint_zero: number,
+  pre_pert_margin: number = 50,  // samples before perturbation to exclude
+): ConstraintResult {
+  // Evaluate from experiment_start up to (perturbation_start - pre_pert_margin samples)
+  // This mirrors ESS pre logic: exclude the transient caused by the perturbation itself
+  const allRows = rows.filter(r => r[time_col] >= experiment_start);
+
+  // Find index of perturbation_start in the filtered rows
+  const pertIdx = allRows.findIndex(r => r[time_col] >= perturbation_start);
+  const endIdx  = pertIdx >= pre_pert_margin ? pertIdx - pre_pert_margin : pertIdx;
+
+  const evalRows = endIdx > 0 ? allRows.slice(0, endIdx) : allRows;
+  const vals = evalRows.map(r => Math.abs(r[col] ?? 0));
+
+  const max_abs_val = vals.length > 0 ? Math.max(...vals) : 0;
+  const n_samples   = vals.length;
+
+  // Linear score: 100 if max_abs ≤ limit, 0 if ≥ zero, linear between
+  const score = Math.max(0, Math.min(100,
+    100 * (constraint_zero - max_abs_val) / (constraint_zero - constraint_limit)
+  ));
+
+  const comment = max_abs_val <= constraint_limit
+    ? `Constraint OK: max=${max_abs_val.toFixed(4)} ≤ ${constraint_limit.toFixed(4)} (${n_samples} muestras, hasta pert-${pre_pert_margin}) → ${score.toFixed(1)}/100`
+    : max_abs_val >= constraint_zero
+      ? `Constraint FAIL: max=${max_abs_val.toFixed(4)} ≥ ${constraint_zero.toFixed(4)} (${n_samples} muestras, hasta pert-${pre_pert_margin}) → 0/100`
+      : `Constraint parcial: max=${max_abs_val.toFixed(4)} en (${constraint_limit.toFixed(4)}, ${constraint_zero.toFixed(4)}) (${n_samples} muestras) → ${score.toFixed(1)}/100`;
+
+  return { max_abs_val, max_abs_unit: '', constraint_limit, constraint_zero, score, comment };
+}
+
+// ── Score for primary variable without Pert (ST/OS/ESS only) ─────────────────
+export function scorePrimaryNoPert(
+  result: AnalysisResult,
+  weights: { ST: number; OS: number; ESS: number; Pert: 0 },
+): number {
+  const total = weights.ST + weights.OS + weights.ESS;
+  if (total === 0) return 0;
+  return (result.ST_score * weights.ST + result.OS_score * weights.OS + result.ESS_score * weights.ESS) / total;
+}
+
 export interface ESSWindow {
   center_time: number;
   mean: number;

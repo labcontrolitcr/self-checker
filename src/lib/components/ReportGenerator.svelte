@@ -1,19 +1,22 @@
 <script lang="ts">
-  import type { AnalysisResult } from '$lib/analysis';
+  import type { AnalysisResult, ConstraintResult } from '$lib/analysis';
   import type { PlantConfig } from '$lib/config/plants.config';
 
   interface Props {
     result: AnalysisResult;
-    result2?: AnalysisResult | null;           // secondary variable (Yaw, Ángulo)
+    result2?: AnalysisResult | null;
+    constraintResult?: ConstraintResult | null;
+    combinedScore?: number | null;
+    primaryNoPertScore?: number | null;
     config: PlantConfig & { experiment_start?: number };
-    cfg2?: (PlantConfig & { experiment_start?: number }) | null;  // config for secondary variable
+    cfg2?: (PlantConfig & { experiment_start?: number }) | null;
     domain: 'continuo' | 'discreto';
     rows: Record<string, number>[];
-    csvRaw: string;       // raw CSV text for fingerprint
-    csvFileName: string;  // original filename shown in config section
+    csvRaw: string;
+    csvFileName: string;
   }
 
-  let { result, result2, config, cfg2, domain, rows, csvRaw, csvFileName }: Props = $props();
+  let { result, result2, constraintResult, combinedScore, primaryNoPertScore, config, cfg2, domain, rows, csvRaw, csvFileName }: Props = $props();
 
   // Google Sheets Web App URL — deploy your Apps Script as web app and paste here
   // SHEETS_URL set below
@@ -257,23 +260,44 @@
         doc.setFont('courier', 'normal'); doc.setFontSize(7.5); doc.setTextColor(100, 100, 100);
         doc.text(pageCfg.label + ' – ' + pageLabel + '  |  ' + domain.toUpperCase() + '  |  ' + (teamName || '—') + '  |  ' + now, PW - M, 6, { align: 'right' });
 
-        // Score
-        const sc = pageResult.final_score;
+        // Score — show combined score if available (constraint mode), else per-page score
+        const displayScore = (isFirstPage && combinedScore != null) ? combinedScore : pageResult.final_score;
+        const sc = displayScore;
         const sRgb = sc >= 90 ? [34,197,94] as const : sc >= 70 ? [202,138,4] as const : [220,38,38] as const;
         doc.setFont('courier', 'bold'); doc.setFontSize(9); doc.setTextColor(...sRgb);
         doc.text(sc.toFixed(1), M, 14.5);
         doc.setTextColor(80, 80, 80); doc.setFont('courier', 'normal'); doc.setFontSize(7.5);
-        doc.text('/ 100', M + 9, 14.5);
+        if (isFirstPage && combinedScore != null) {
+          doc.text('/ 100  COMBINADA', M + 9, 14.5);
+        } else {
+          doc.text('/ 100', M + 9, 14.5);
+        }
         let sx = M + 28;
-        [
-          { lbl: 'ST', v: pageResult.ST_score }, { lbl: 'OS', v: pageResult.OS_score },
-          { lbl: 'ESS', v: pageResult.ESS_score }, { lbl: 'PERT', v: pageResult.Pert_score },
-        ].forEach(({ lbl, v }) => {
-          const rgb = v >= 90 ? [34,197,94] as const : v >= 70 ? [202,138,4] as const : [220,38,38] as const;
-          doc.setTextColor(110,110,110); doc.setFontSize(6.5); doc.text(lbl, sx, 12.5);
-          doc.setTextColor(...rgb); doc.setFontSize(8); doc.setFont('courier','bold');
-          doc.text(v.toFixed(0), sx, 16); doc.setFont('courier','normal'); sx += 18;
-        });
+        // For constraint mode first page, show ST/OS/ESS + PERT + CONSTRAINT breakdown
+        if (isFirstPage && combinedScore != null && constraintResult) {
+          const secLbl = (config as any).secondary_label ?? cfg2?.control_col ?? 'VAR2';
+          const items = [
+            { lbl: 'ST+OS+ESS', v: primaryNoPertScore ?? pageResult.ST_score },
+            { lbl: 'PERT',      v: pageResult.Pert_score },
+            { lbl: secLbl.toUpperCase().slice(0,6), v: constraintResult.score },
+          ];
+          items.forEach(({ lbl, v }) => {
+            const rgb = v >= 90 ? [34,197,94] as const : v >= 70 ? [202,138,4] as const : [220,38,38] as const;
+            doc.setTextColor(110,110,110); doc.setFontSize(6); doc.text(lbl, sx, 12.5);
+            doc.setTextColor(...rgb); doc.setFontSize(8); doc.setFont('courier','bold');
+            doc.text(v.toFixed(0), sx, 16); doc.setFont('courier','normal'); sx += 26;
+          });
+        } else {
+          [
+            { lbl: 'ST', v: pageResult.ST_score }, { lbl: 'OS', v: pageResult.OS_score },
+            { lbl: 'ESS', v: pageResult.ESS_score }, { lbl: 'PERT', v: pageResult.Pert_score },
+          ].forEach(({ lbl, v }) => {
+            const rgb = v >= 90 ? [34,197,94] as const : v >= 70 ? [202,138,4] as const : [220,38,38] as const;
+            doc.setTextColor(110,110,110); doc.setFontSize(6.5); doc.text(lbl, sx, 12.5);
+            doc.setTextColor(...rgb); doc.setFontSize(8); doc.setFont('courier','bold');
+            doc.text(v.toFixed(0), sx, 16); doc.setFont('courier','normal'); sx += 18;
+          });
+        }
         doc.setDrawColor(210,210,210); doc.setLineWidth(0.15); doc.line(M, 18, PW - M, 18);
 
         // Charts 2×2
@@ -358,8 +382,62 @@
       await renderPage(doc, result, config, primarySignal, primaryLabel, true);
 
       if (result2 && cfg2) {
+        // Normal secondary: full chart page
         const signal2 = rows.map(r => r[cfg2.control_col]);
         await renderPage(doc, result2, cfg2, signal2, secondaryLabel2, false);
+      } else if (constraintResult && cfg2) {
+        // Constraint secondary: dedicated constraint page
+        doc.addPage();
+        const PW = 297, PH = 210, M = 12;
+        const safe = (s: string) => s.replace(/[^\x00-\x7F]/g, ' ').replace(/  +/g, ' ').trim();
+        const now = new Date().toLocaleString('es-CR', { dateStyle: 'short', timeStyle: 'short' });
+
+        // Header
+        doc.setDrawColor(60, 60, 60); doc.setLineWidth(0.2); doc.line(M, 8, PW - M, 8);
+        doc.setTextColor(40, 40, 40); doc.setFont('courier', 'bold'); doc.setFontSize(10);
+        doc.text('SELF-CHECKER', M, 6);
+        doc.setFont('courier', 'normal'); doc.setFontSize(7.5); doc.setTextColor(100, 100, 100);
+        doc.text(config.label + ' – ' + secondaryLabel2.toUpperCase() + ' CONSTRAINT  |  ' + domain.toUpperCase() + '  |  ' + (teamName || '—') + '  |  ' + now, PW - M, 6, { align: 'right' });
+
+        // Constraint score
+        const cs = constraintResult.score;
+        const csRgb = cs >= 90 ? [34,197,94] as const : cs >= 70 ? [202,138,4] as const : [220,38,38] as const;
+        doc.setFont('courier', 'bold'); doc.setFontSize(9); doc.setTextColor(...csRgb);
+        doc.text(cs.toFixed(1), M, 14.5);
+        doc.setTextColor(80, 80, 80); doc.setFont('courier', 'normal'); doc.setFontSize(7.5);
+        doc.text('/ 100  CONSTRAINT', M + 9, 14.5);
+        doc.setDrawColor(210,210,210); doc.setLineWidth(0.15); doc.line(M, 18, PW - M, 18);
+
+        // Constraint details box
+        const boxY = 24;
+        doc.setFont('courier', 'bold'); doc.setFontSize(7); doc.setTextColor(100, 100, 100);
+        doc.text('CRITERIO', M, boxY);
+        doc.text('DETALLE', M + 40, boxY);
+        doc.text('NOTA', PW - M - 15, boxY);
+        doc.setDrawColor(210,210,210); doc.setLineWidth(0.12);
+        doc.line(M, boxY + 2, PW - M, boxY + 2);
+
+        doc.setFont('courier', 'normal'); doc.setFontSize(6.5); doc.setTextColor(60, 60, 60);
+        const detail = [
+          'max|' + secondaryLabel2 + '| = ' + constraintResult.max_abs_val.toFixed(5),
+          'lim_100 = ' + constraintResult.constraint_limit.toFixed(5),
+          'lim_0   = ' + constraintResult.constraint_zero.toFixed(5),
+        ].join('   ');
+        doc.text('MAX ABSOLUTO', M, boxY + 9);
+        doc.text(detail, M + 40, boxY + 9);
+        doc.setTextColor(...csRgb); doc.setFont('courier', 'bold');
+        doc.text(cs.toFixed(1), PW - M - 15, boxY + 9);
+
+        // Comment
+        doc.setDrawColor(210,210,210); doc.line(M, boxY + 13, PW - M, boxY + 13);
+        doc.setFont('courier', 'normal'); doc.setFontSize(6); doc.setTextColor(100,100,100);
+        doc.text('> ' + safe(constraintResult.comment), M, boxY + 18, { maxWidth: PW - M * 2 });
+
+        // Footer
+        doc.setTextColor(150,150,150); doc.setFontSize(5.5);
+        doc.text('Self Checker — IE TEC', M, PH - 2);
+        doc.setFont('courier','normal'); doc.setFontSize(4.8); doc.setTextColor(175,175,175);
+        doc.text(serialCode, PW - M, PH - 2, { align: 'right' });
       }
 
       // Metadata

@@ -117,11 +117,22 @@ export interface PlantConfig {
 
   y_limits: [number, number] | null;  // Y axis [min, max], null = auto
 
-  // Optional second variable to evaluate independently (e.g. Yaw in Heli2DOF, Angulo in Grúa)
+  // Optional second variable — either independent analysis or constraint check
   secondary_control_col?: string;
   secondary_ref?: number;
   secondary_y_limits?: [number, number] | null;
   secondary_label?: string;  // display name override (default: secondary_control_col)
+
+  // Constraint mode: secondary variable is a limit to not exceed, not a setpoint to track
+  // Score: 100 if max_abs <= constraint_limit, 0 if max_abs >= constraint_zero, linear between
+  secondary_mode?: 'normal' | 'constraint';
+  constraint_limit?: number;   // threshold for 100 (e.g. 0.1745 rad = 10°)
+  constraint_zero?: number;    // threshold for 0   (e.g. 0.3491 rad = 20°)
+
+  // When secondary_mode='constraint', the primary variable's Pert is scored separately.
+  // primary_weights_no_pert: weights used for the ST/OS/ESS portion (Pert must be 0)
+  // The final combined score = primary_no_pert(33.33%) + primary_pert(33.33%) + constraint(33.33%)
+  primary_weights_no_pert?: { ST: number; OS: number; ESS: number; Pert: 0 };
 
   domains: ('continuo' | 'discreto')[];
   exp_start_t: Partial<Record<'continuo' | 'discreto', number>>;  // experiment start time per domain (default 0)
@@ -186,15 +197,19 @@ export const plants: PlantConfig[] = [
     available: true,
     secondary_control_col: 'Angulo',
     secondary_ref: 0.0,
-    secondary_y_limits: null,
+    secondary_y_limits: [-0.4, 0.4],
     secondary_label: 'Ángulo',
-    csv_cols: ['Tiempo', 'Posicion', 'Angulo', 'Entrada'],
+    secondary_mode: 'constraint',
+    constraint_limit: 0.17453292519943295,  // 10° in rad
+    constraint_zero:  0.3490658503988659,   // 20° in rad
+    primary_weights_no_pert: { ST: 33, OS: 33, ESS: 34, Pert: 0 as const },
+    csv_cols: ['Tiempo', 'Carrito', 'Angulo', 'Entrada'],
     time_col: 'Tiempo',
-    control_col: 'Posicion',
-    ref: 1.0,
+    control_col: 'Carrito',
+    ref: 0.5,
     tol_st: 0.02,
-    t_obj: 3.0,
-    t_win: 2.0,
+    t_obj: 6,
+    t_win: 2,
     tol_os: 0.05,
     ess_tol: 0.01,
     ess_k_win: 50,
@@ -202,13 +217,13 @@ export const plants: PlantConfig[] = [
     perturbation_window: 0.5,
     pert_recovery_k_win: 50,
     pert_recovery_tol: 0.02,
-    weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
+    weights: { ST: 0, OS: 0, ESS: 0, Pert: 100 },  // primary: Pert scored separately; ST/OS/ESS via primary_weights_no_pert
     pert_zscore_min: 3,
     pert_detect_win: 40,
     smooth: true,
     st_proportion_only: false,
     y_limits: null,
-    domains: ['continuo', 'discreto'],
+    domains: ['continuo'],
     exp_start_t: {},
   },
   {
@@ -253,8 +268,12 @@ export const plants: PlantConfig[] = [
     ref: 15.0,
     secondary_control_col: 'Yaw',
     secondary_ref: 0.0,
-    secondary_y_limits: null,
+    secondary_y_limits: [-0.2, 0.2],
     secondary_label: 'Yaw',
+    secondary_mode: 'constraint',
+    constraint_limit: 0.1,   // 0.1 rad
+    constraint_zero:  0.2,   // 0.2 rad
+    primary_weights_no_pert: { ST: 33, OS: 33, ESS: 34, Pert: 0 as const },
     tol_st: 0.02,
     t_obj: 2.5,
     t_win: 2.0,
@@ -265,7 +284,7 @@ export const plants: PlantConfig[] = [
     perturbation_window: 0.5,
     pert_recovery_k_win: 50,
     pert_recovery_tol: 0.02,
-    weights: { ST: 25, OS: 25, ESS: 25, Pert: 25 },
+    weights: { ST: 0, OS: 0, ESS: 0, Pert: 100 },  // primary: Pert scored separately; ST/OS/ESS via primary_weights_no_pert
     pert_zscore_min: 3,
     pert_detect_win: 40,
     smooth: true,

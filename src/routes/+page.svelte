@@ -4,8 +4,8 @@
   import StatsPanel from '$lib/components/StatsPanel.svelte';
   import type { PlantConfig } from '$lib/config/plants.config';
   import { resolveCsvCols, csvColsHint } from '$lib/config/plants.config';
-  import { parseCSV, parseCSVHeaders, analyzeResponse } from '$lib/analysis';
-  import type { AnalysisResult } from '$lib/analysis';
+  import { parseCSV, parseCSVHeaders, analyzeResponse, analyzeConstraint, scorePrimaryNoPert } from '$lib/analysis';
+  import type { AnalysisResult, ConstraintResult } from '$lib/analysis';
 
   // ── State ──────────────────────────────────────────────────────────────────
   let selectedPlant  = $state<PlantConfig | null>(null);
@@ -40,7 +40,8 @@
   let selectedDomain = $state<'continuo' | 'discreto' | null>(null);
   let rows           = $state<Record<string, number>[]>([]);
   let result         = $state<AnalysisResult | null>(null);
-  let result2        = $state<AnalysisResult | null>(null);  // secondary variable (e.g. Yaw, Angulo)
+  let result2          = $state<AnalysisResult | null>(null);     // secondary variable (normal mode)
+  let constraintResult = $state<ConstraintResult | null>(null);  // secondary variable (constraint mode)
   let fileName       = $state<string>('');
   let error          = $state<string>('');   // CSV-level error (no time col, too short, etc.)
 
@@ -57,8 +58,9 @@
 
   let csvHeaders         = $state<string[] | null>(null);
   let headersMatch       = $state(false);
-  let selectedTimeCol    = $state<string>('');
-  let selectedControlCol = $state<string>('');
+  let selectedTimeCol      = $state<string>('');
+  let selectedControlCol   = $state<string>('');
+  let selectedSecondaryCol = $state<string>('');
 
   // ── Time column regex ──────────────────────────────────────────────────────
   const TIME_RE = /^(tiempo|t|k)$/i;
@@ -72,12 +74,14 @@
   const showColSelector = $derived(csvHeaders !== null && fileName !== '' && !error);
 
   // csvReady: file loaded, no error, and time col identified — unlocks domain step
+  // For plants with a secondary variable, both cols must be chosen before unlocking domain
   const csvReady = $derived(
-    fileName !== '' && !error && selectedTimeCol !== '' && selectedControlCol !== ''
+    fileName !== '' && !error && selectedTimeCol !== '' && selectedControlCol !== '' &&
+    (selectedPlant?.secondary_control_col ? selectedSecondaryCol !== '' : true)
   );
 
   // ── Analysis runner — only called when domain is already set ───────────────
-  function runAnalysis(timeCol: string, ctrlCol: string, csvText: string, plant: PlantConfig) {
+  function runAnalysis(timeCol: string, ctrlCol: string, csvText: string, plant: PlantConfig, secCol?: string) {
     error = '';
     try {
       const resolvedForRun = resolveCsvCols(plant.csv_cols, csvHeaders ?? []);
@@ -92,37 +96,101 @@
       };
       const parsed = parseCSV(csvText, cfg.csv_cols as string[]);
       if (parsed.length < 10) throw new Error('Archivo muy corto o formato incorrecto.');
+
+      console.group(`[SelfChecker] ${plant.id} | ${selectedDomain} | ${new Date().toLocaleTimeString('es-CR')}`);
+      console.log('── Configuración ──────────────────────────────');
+      console.log(`  planta:           ${plant.id} (${plant.label})`);
+      console.log(`  dominio:          ${selectedDomain}`);
+      console.log(`  col tiempo:       ${timeCol}`);
+      console.log(`  col primaria:     ${ctrlCol}  ref=${cfg.ref}`);
+      console.log(`  exp_start:        ${experimentStart}s`);
+      console.log(`  pert_start:       ${perturbationStart}s  window=${perturbationWindow}s`);
+      console.log(`  t_obj:            ${plant.t_obj}s  t_win=${plant.t_win}s`);
+      console.log(`  tol_st/os:        ±${(plant.tol_st*100).toFixed(1)}% / ${(plant.tol_os*100).toFixed(1)}%`);
+      console.log(`  weights:          ST=${plant.weights.ST} OS=${plant.weights.OS} ESS=${plant.weights.ESS} Pert=${plant.weights.Pert}`);
+      if ((plant as any).primary_weights_no_pert) {
+        const w = (plant as any).primary_weights_no_pert;
+        console.log(`  p_weights_noPert: ST=${w.ST} OS=${w.OS} ESS=${w.ESS}`);
+      }
+      console.log(`  filas:            ${parsed.length}  headers: [${Object.keys(parsed[0]).join(', ')}]`);
+      const tArr = parsed.map((r: any) => r[timeCol]);
+      const dt = (tArr[tArr.length-1] - tArr[0]) / (tArr.length - 1);
+      console.log(`  t rango:          [${tArr[0]?.toFixed(3)}, ${tArr[tArr.length-1]?.toFixed(3)}]s  dt≈${(dt*1000).toFixed(2)}ms`);
+      const sig = parsed.map((r: any) => r[ctrlCol]);
+      const sigAfterStart = parsed.filter((r: any) => r[timeCol] >= experimentStart).map((r: any) => r[ctrlCol]);
+      console.log(`  señal primaria:   min=${Math.min(...sig).toFixed(4)}  max=${Math.max(...sig).toFixed(4)}  final=${sigAfterStart[sigAfterStart.length-1]?.toFixed(4)}`);
+
       rows = parsed;
       result = analyzeResponse(parsed, cfg);
 
-      // Secondary variable analysis (e.g. Yaw for Heli 2DOF, Ángulo for Grúa)
-      if (plant.secondary_control_col) {
-        const cfg2 = {
-          ...cfg,
-          control_col: plant.secondary_control_col,
-          ref: plant.secondary_ref ?? 0,
-          y_limits: plant.secondary_y_limits ?? null,
-        };
-        result2 = analyzeResponse(parsed, cfg2);
+      console.log('── Resultado primario ─────────────────────────');
+      console.log(`  final_score:  ${result.final_score.toFixed(2)}`);
+      console.log(`  ST:   ${result.ST_score.toFixed(1)}  t_st=${result.settling_time_actual?.toFixed(3) ?? 'null'}s  prop_ok=${(result.ST_prop_ok*100).toFixed(1)}%`);
+      console.log(`  OS:   ${result.OS_score.toFixed(1)}  pico=${result.OS_val.toFixed(4)}  OS%=${((Math.max(0, result.OS_val - cfg.ref) / cfg.ref) * 100).toFixed(2)}%`);
+      console.log(`  ESS:  ${result.ESS_score.toFixed(1)}  pre_mean=${result.ESS_pre.mean.toFixed(4)}  err%=${result.ESS_pre.error_pct.toFixed(3)}  IAE=${(result as any).ESS_pre_iae?.toFixed(4)}`);
+      console.log(`  Pert: ${result.Pert_score.toFixed(1)}  ST_pert=${result.Pert_ST_score.toFixed(1)}  ESS_post=${result.ESS_post_score.toFixed(1)}`);
+      if (result.exp_start_warning) console.warn(`  ⚠ exp_start:  ${result.exp_start_warning}`);
+      if (result.pert_warning)      console.warn(`  ⚠ pert:       ${result.pert_warning}`);
+      if (result.ess_step_warning)  console.warn(`  ⚠ ess_step:   ${result.ess_step_warning}`);
+
+      // Secondary variable
+      const resolvedSecCol = secCol ?? selectedSecondaryCol;
+      if ((plant as any).secondary_control_col && resolvedSecCol) {
+        console.log('── Variable secundaria ────────────────────────');
+        console.log(`  col:   ${resolvedSecCol}  (config: ${(plant as any).secondary_control_col})`);
+        console.log(`  mode:  ${(plant as any).secondary_mode ?? 'normal'}`);
+        const sig2 = parsed.map((r: any) => r[resolvedSecCol]);
+        const sig2AfterStart = parsed.filter((r: any) => r[timeCol] >= experimentStart).map((r: any) => r[resolvedSecCol]);
+        console.log(`  señal: min=${Math.min(...sig2).toFixed(4)}  max=${Math.max(...sig2).toFixed(4)}  max_abs=${Math.max(...sig2.map(Math.abs)).toFixed(4)} (post exp_start max_abs=${Math.max(...sig2AfterStart.map(Math.abs)).toFixed(4)})`);
+
+        if ((plant as any).secondary_mode === 'constraint') {
+          console.log(`  limit_100: ${(plant as any).constraint_limit?.toFixed(5)}  limit_0: ${(plant as any).constraint_zero?.toFixed(5)}`);
+          constraintResult = analyzeConstraint(
+            parsed, resolvedSecCol, cfg.time_col, experimentStart, perturbationStart,
+            (plant as any).constraint_limit!, (plant as any).constraint_zero!,
+          );
+          console.log(`  constraint score: ${constraintResult.score.toFixed(2)}  max_abs=${constraintResult.max_abs_val.toFixed(5)}`);
+          console.log(`  → ${constraintResult.comment}`);
+          if ((plant as any).primary_weights_no_pert) {
+            const w = (plant as any).primary_weights_no_pert;
+            const total = w.ST + w.OS + w.ESS;
+            const nopert = (result.ST_score*w.ST + result.OS_score*w.OS + result.ESS_score*w.ESS) / total;
+            const combined = (nopert + result.Pert_score + constraintResult.score) / 3;
+            console.log(`  nota combinada: (ST_OS_ESS=${nopert.toFixed(2)} + Pert=${result.Pert_score.toFixed(2)} + constraint=${constraintResult.score.toFixed(2)}) / 3 = ${combined.toFixed(2)}`);
+          }
+          const cfg2c = { ...cfg, control_col: resolvedSecCol, ref: 0, y_limits: (plant as any).secondary_y_limits ?? null };
+          result2 = analyzeResponse(parsed, cfg2c);
+        } else {
+          constraintResult = null;
+          const cfg2 = { ...cfg, control_col: resolvedSecCol, ref: (plant as any).secondary_ref ?? 0, y_limits: (plant as any).secondary_y_limits ?? null };
+          result2 = analyzeResponse(parsed, cfg2);
+          console.log(`  final_score: ${result2.final_score.toFixed(2)}  ST=${result2.ST_score.toFixed(1)}  OS=${result2.OS_score.toFixed(1)}  ESS=${result2.ESS_score.toFixed(1)}  Pert=${result2.Pert_score.toFixed(1)}`);
+        }
       } else {
+        if ((plant as any).secondary_control_col && !resolvedSecCol)
+          console.warn(`  ⚠ secondary_control_col='${(plant as any).secondary_control_col}' pero resolvedSecCol vacío — columna no seleccionada`);
         result2 = null;
+        constraintResult = null;
       }
+
+      console.groupEnd();
     } catch (e) {
+      console.error('[SelfChecker] Error en análisis:', e);
       error = e instanceof Error ? e.message : String(e);
-      rows = []; result = null; result2 = null;
+      rows = []; result = null; result2 = null; constraintResult = null;
     }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function clearAll() {
-    rows = []; result = null; result2 = null; error = '';
+    rows = []; result = null; result2 = null; constraintResult = null; error = '';
     fileName = ''; cachedCSVText = ''; cachedFileName = '';
     csvHeaders = null; headersMatch = false;
-    selectedTimeCol = ''; selectedControlCol = '';
+    selectedTimeCol = ''; selectedControlCol = ''; selectedSecondaryCol = '';
   }
 
   function clearResults() {
-    rows = []; result = null; result2 = null;
+    rows = []; result = null; result2 = null; constraintResult = null;
   }
 
   // ── Plant select ───────────────────────────────────────────────────────────
@@ -203,7 +271,7 @@
 
     // Reset everything except plant
     rows = []; result = null; error = '';
-    selectedTimeCol = ''; selectedControlCol = '';
+    selectedTimeCol = ''; selectedControlCol = ''; selectedSecondaryCol = '';
     csvHeaders = null; headersMatch = false;
     selectedDomain     = null;   // reset domain so user re-picks after new file
     domainEverSelected = false;
@@ -225,6 +293,7 @@
       headersMatch       = true;
       selectedTimeCol    = selectedPlant.time_col;
       selectedControlCol = selectedPlant.control_col;
+      selectedSecondaryCol = selectedPlant.secondary_control_col ?? '';
       // Don't run analysis — wait for domain
       return;
     }
@@ -247,9 +316,33 @@
         ?? headers.find(h => h !== timeCol)
         ?? headers[0];
       selectedControlCol = ctrlCol;
+      // Auto-detect secondary column
+      if (selectedPlant!.secondary_control_col) {
+        const sec = headers.find(h => h.toLowerCase() === selectedPlant!.secondary_control_col!.toLowerCase())
+          ?? headers.find(h => h !== timeCol && h !== ctrlCol)
+          ?? '';
+        selectedSecondaryCol = sec;
+      }
     } else {
-      // Mismatch — pre-select best guess, user can change
-      selectedControlCol = headers.find(h => h !== timeCol) ?? headers[0];
+      // Mismatch — map by position in csv_cols so the right column is pre-selected
+      // e.g. grúa csv_cols = ['Tiempo','Posicion','Angulo','Entrada']
+      // control_col = 'Posicion' is index 1 → map to headers[1] (skipping time)
+      const cfgCols    = selectedPlant!.csv_cols as string[];
+      const nonTimeCfg = cfgCols.filter(c => c.toLowerCase() !== selectedPlant!.time_col.toLowerCase());
+      const nonTimeHdr = headers.filter(h => h !== timeCol);
+
+      // Primary: position of control_col in non-time cfg cols → same position in actual headers
+      const primaryIdx = nonTimeCfg.findIndex(
+        c => c.toLowerCase() === selectedPlant!.control_col.toLowerCase()
+      );
+      selectedControlCol = nonTimeHdr[primaryIdx] ?? nonTimeHdr[0] ?? headers[0];
+
+      if (selectedPlant!.secondary_control_col) {
+        const secondaryIdx = nonTimeCfg.findIndex(
+          c => c.toLowerCase() === selectedPlant!.secondary_control_col!.toLowerCase()
+        );
+        selectedSecondaryCol = nonTimeHdr[secondaryIdx] ?? nonTimeHdr.find(h => h !== selectedControlCol) ?? '';
+      }
     }
     // Don't run analysis — wait for domain selection
   }
@@ -265,6 +358,13 @@
     // If domain is already chosen (e.g. user changes col after analysis), re-run
     if (selectedDomain && cachedCSVText && selectedPlant && selectedTimeCol) {
       runAnalysis(selectedTimeCol, col, cachedCSVText, selectedPlant);
+    }
+  }
+
+  function selectSecondaryCol(col: string) {
+    selectedSecondaryCol = col;
+    if (selectedDomain && cachedCSVText && selectedPlant && selectedTimeCol && selectedControlCol) {
+      runAnalysis(selectedTimeCol, selectedControlCol, cachedCSVText, selectedPlant);
     }
   }
 </script>
@@ -294,6 +394,7 @@
       {headersMatch}
       {selectedTimeCol}
       {selectedControlCol}
+      {selectedSecondaryCol}
       {hasData}
       expStartWarning={result?.exp_start_warning ?? null}
       essStepWarning={result?.ess_step_warning ?? null}
@@ -305,6 +406,7 @@
       onFileChange={handleFile}
       onTimeColSelect={selectTimeCol}
       onControlColSelect={selectControlCol}
+      onSecondaryColSelect={selectSecondaryCol}
     />
 
     {#if showReusePrompt}
@@ -331,12 +433,19 @@
       time_col: selectedTimeCol,
       control_col: selectedControlCol,
     }}
-    {@const cfg2 = result2 && selectedPlant.secondary_control_col ? {
+    {@const cfg2 = selectedPlant.secondary_control_col ? {
       ...cfg,
-      control_col: selectedPlant.secondary_control_col,
-      ref: selectedPlant.secondary_ref ?? 0,
+      control_col: selectedSecondaryCol || selectedPlant.secondary_control_col,
+      ref: selectedPlant.secondary_mode === 'constraint' ? 0 : (selectedPlant.secondary_ref ?? 0),
       y_limits: selectedPlant.secondary_y_limits ?? null,
     } : null}
+    {@const constraintScore = constraintResult?.score ?? null}
+    {@const primaryNoPertScore = selectedPlant.primary_weights_no_pert
+      ? scorePrimaryNoPert(result, selectedPlant.primary_weights_no_pert)
+      : null}
+    {@const combinedScore = constraintResult && primaryNoPertScore !== null
+      ? (primaryNoPertScore + result.Pert_score + constraintScore!) / 3
+      : null}
     <section class="results-section" class:panel-collapsed={panelCollapsed}>
       <div class="chart-area">
         <ResponseChart {rows} config={cfg} {result} domain={selectedDomain} {chartHeight} />
@@ -344,7 +453,17 @@
 
       {#if cfg2 && result2}
         <div class="chart-area" style="margin-top: 0.5rem;">
-          <ResponseChart {rows} config={cfg2} result={result2} domain={selectedDomain} {chartHeight} />
+          <ResponseChart
+            {rows}
+            config={cfg2}
+            result={result2}
+            domain={selectedDomain}
+            {chartHeight}
+            constraintBands={constraintResult ? {
+              limit: selectedPlant.constraint_limit!,
+              zero:  selectedPlant.constraint_zero!,
+            } : undefined}
+          />
         </div>
       {/if}
 
@@ -360,7 +479,19 @@
       ><div class="resize-grip"><span></span></div></div>
 
       <div class="stats-area">
-        <StatsPanel {result} result2={result2 ?? undefined} {cfg2} config={cfg} domain={selectedDomain} {rows} csvRaw={cachedCSVText} csvFileName={cachedFileName} />
+        <StatsPanel
+          {result}
+          result2={result2 ?? undefined}
+          {constraintResult}
+          {combinedScore}
+          {primaryNoPertScore}
+          {cfg2}
+          config={cfg}
+          domain={selectedDomain}
+          {rows}
+          csvRaw={cachedCSVText}
+          csvFileName={cachedFileName}
+        />
       </div>
     </section>
   {/if}

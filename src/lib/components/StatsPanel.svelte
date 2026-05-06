@@ -1,11 +1,14 @@
 <script lang="ts">
-  import type { AnalysisResult } from '$lib/analysis';
+  import type { AnalysisResult, ConstraintResult } from '$lib/analysis';
   import type { PlantConfig } from '$lib/config/plants.config';
   import ReportGenerator from '$lib/components/ReportGenerator.svelte';
 
   interface Props {
     result: AnalysisResult;
-    result2?: AnalysisResult;           // secondary variable (Yaw, Ángulo, etc.)
+    result2?: AnalysisResult;                // secondary variable (normal mode)
+    constraintResult?: ConstraintResult | null;  // secondary variable (constraint mode)
+    combinedScore?: number | null;           // pre-computed combined score (constraint plants)
+    primaryNoPertScore?: number | null;      // ST+OS+ESS score of primary (no Pert)
     config: PlantConfig & { experiment_start?: number };
     cfg2?: (PlantConfig & { experiment_start?: number }) | null;  // config for secondary variable
     domain: 'continuo' | 'discreto';
@@ -14,12 +17,13 @@
     csvFileName: string;  // original filename — shown in PDF config section
   }
 
-  let { result, result2, config, cfg2, domain, rows, csvRaw, csvFileName }: Props = $props();
+  let { result, result2, constraintResult, combinedScore, primaryNoPertScore, config, cfg2, domain, rows, csvRaw, csvFileName }: Props = $props();
 
   const secondaryLabel = $derived(
-    (config as any).secondary_label ?? cfg2?.control_col ?? config.secondary_control_col ?? 'Variable 2'
+    (config as any).secondary_label ?? cfg2?.control_col ?? (config as any).secondary_control_col ?? 'Variable 2'
   );
   const primaryLabel = $derived(config.control_col);
+  const isConstraintMode = $derived(!!constraintResult);
 
   function scoreClass(score: number): string {
     if (score >= 90) return 'ok';
@@ -188,11 +192,73 @@
         <span class="tag muted">MA={r.ma_window}</span>
       {/if}
       <span class="tag">{domain.toUpperCase()}</span>
-      <ReportGenerator {result} {result2} {config} {cfg2} {domain} {rows} {csvRaw} {csvFileName} />
+      <ReportGenerator {result} {result2} {constraintResult} {combinedScore} {primaryNoPertScore} {config} {cfg2} {domain} {rows} {csvRaw} {csvFileName} />
     </div>
   </div>
 
-  {#if result2 && cfg2}
+  {#if isConstraintMode && constraintResult}
+    <!-- Constraint mode: combined score banner + two columns -->
+    {#if combinedScore !== null && combinedScore !== undefined}
+      <div class="combined-score-banner">
+        <span class="combined-label">NOTA COMBINADA</span>
+        <span class="combined-value {scoreClass(combinedScore)}">{fmt(combinedScore, 1)} / 100</span>
+        <div class="combined-breakdown">
+          <span class="cb-item">ST+OS+ESS <span class="{scoreClass(primaryNoPertScore ?? 0)}">{fmt(primaryNoPertScore ?? 0, 1)}</span></span>
+          <span class="cb-sep">·</span>
+          <span class="cb-item">PERT <span class="{scoreClass(result.Pert_score)}">{fmt(result.Pert_score, 1)}</span></span>
+          <span class="cb-sep">·</span>
+          <span class="cb-item">{secondaryLabel.toUpperCase()} <span class="{scoreClass(constraintResult.score)}">{fmt(constraintResult.score, 1)}</span></span>
+          <span class="cb-sep">·</span>
+          <span class="cb-note">33.3% cada uno</span>
+        </div>
+      </div>
+      <div class="divider"></div>
+    {/if}
+    <div class="dual-col">
+      <div class="var-col">
+        {@render varStats(result, config, r, primaryLabel)}
+      </div>
+      <div class="col-divider"></div>
+      <div class="var-col">
+        <!-- Constraint panel -->
+        <div class="var-header">
+          <span class="var-label">{secondaryLabel} — constraint</span>
+          <span class="var-ref">lím = {fmt(constraintResult.constraint_limit, 4)}</span>
+        </div>
+
+        <div class="score-row">
+          <span class="score-label">NOTA CONSTRAINT</span>
+          <span class="score-value {scoreClass(constraintResult.score)}">{fmt(constraintResult.score, 1)} / 100</span>
+        </div>
+
+        <div class="divider"></div>
+
+        <table class="metrics-table">
+          <thead>
+            <tr><th>CRITERIO</th><th>DETALLE</th><th>NOTA</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="crit-name">MÁX<br/>ABSOLUTO</td>
+              <td>
+                max|{secondaryLabel}| = {fmt(constraintResult.max_abs_val, 5)}<br/>
+                lím 100 = {fmt(constraintResult.constraint_limit, 5)}<br/>
+                lím 0   = {fmt(constraintResult.constraint_zero, 5)}
+              </td>
+              <td class="{scoreClass(constraintResult.score)}">{fmt(constraintResult.score, 1)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="divider"></div>
+
+        <div class="comments">
+          <span class="comments-title">OBSERVACIONES</span>
+          <pre class="comment-line">> {constraintResult.comment}</pre>
+        </div>
+      </div>
+    </div>
+  {:else if result2 && cfg2}
     <div class="dual-col">
       <div class="var-col">
         {@render varStats(result, config, r, primaryLabel)}
@@ -209,6 +275,42 @@
 </div>
 
 <style>
+  /* ── Combined score banner (constraint mode) ────────────────────── */
+  .combined-score-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .combined-label {
+    font-size: 0.62rem;
+    letter-spacing: 0.1em;
+    color: var(--muted-foreground, #888);
+    font-weight: 700;
+  }
+
+  .combined-value {
+    font-size: 1.8rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+
+  .combined-breakdown {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    font-size: 0.62rem;
+    color: var(--muted-foreground, #888);
+    margin-top: 0.1rem;
+  }
+
+  .cb-item { display: flex; gap: 0.25rem; align-items: center; }
+  .cb-item span { font-weight: 700; font-size: 0.68rem; }
+  .cb-sep { color: var(--border, #444); }
+  .cb-note { font-size: 0.58rem; color: var(--muted-foreground, #555); font-style: italic; }
+
   /* ── Dual variable layout ───────────────────────────────────────── */
   .dual-col {
     display: grid;

@@ -19,6 +19,7 @@
     headersMatch: boolean;
     selectedTimeCol: string;
     selectedControlCol: string;
+    selectedSecondaryCol: string;
     hasData: boolean;
     expStartWarning: string | null;
     essStepWarning: string | null;
@@ -30,6 +31,7 @@
     onFileChange: (e: Event) => void;
     onTimeColSelect: (col: string) => void;
     onControlColSelect: (col: string) => void;
+    onSecondaryColSelect: (col: string) => void;
   }
 
   let {
@@ -49,6 +51,7 @@
     headersMatch,
     selectedTimeCol,
     selectedControlCol,
+    selectedSecondaryCol,
     hasData,
     expStartWarning,
     essStepWarning,
@@ -60,6 +63,7 @@
     onFileChange,
     onTimeColSelect,
     onControlColSelect,
+    onSecondaryColSelect,
   }: Props = $props();
 
   // Derived strings — always in sync with props, no stale capture
@@ -163,7 +167,14 @@
             </div>
           </div>
           <div class="col-selector-row">
-            <span class="col-selector-label">COLUMNA</span>
+            <span class="col-selector-label">
+              {#if selectedPlant?.secondary_control_col}
+                COLUMNA 1
+                <span class="col-expected">({selectedPlant.control_col})</span>
+              {:else}
+                COLUMNA
+              {/if}
+            </span>
             <div class="btn-row">
               {#each csvHeaders as col}
                 <button
@@ -174,6 +185,23 @@
               {/each}
             </div>
           </div>
+          {#if selectedPlant?.secondary_control_col !== undefined}
+            <div class="col-selector-row">
+              <span class="col-selector-label">
+                COLUMNA 2
+                <span class="col-expected">({(selectedPlant as any).secondary_label ?? selectedPlant.secondary_control_col})</span>
+              </span>
+              <div class="btn-row">
+                {#each csvHeaders as col}
+                  <button
+                    class="col-btn"
+                    class:active={selectedSecondaryCol === col}
+                    onclick={() => onSecondaryColSelect(col)}
+                  >{col}</button>
+                {/each}
+              </div>
+            </div>
+          {/if}
         </div>
       {/if}
     {/if}
@@ -468,6 +496,17 @@
     color: var(--muted-foreground);
     white-space: nowrap;
     min-width: 4.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .col-expected {
+    font-size: 0.58rem;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+    color: var(--muted-foreground);
+    opacity: 0.65;
   }
 
   .col-btn {
