@@ -40,6 +40,7 @@
   let selectedDomain = $state<'continuo' | 'discreto' | null>(null);
   let rows           = $state<Record<string, number>[]>([]);
   let result         = $state<AnalysisResult | null>(null);
+  let result2        = $state<AnalysisResult | null>(null);  // secondary variable (e.g. Yaw, Angulo)
   let fileName       = $state<string>('');
   let error          = $state<string>('');   // CSV-level error (no time col, too short, etc.)
 
@@ -93,22 +94,35 @@
       if (parsed.length < 10) throw new Error('Archivo muy corto o formato incorrecto.');
       rows = parsed;
       result = analyzeResponse(parsed, cfg);
+
+      // Secondary variable analysis (e.g. Yaw for Heli 2DOF, Ángulo for Grúa)
+      if (plant.secondary_control_col) {
+        const cfg2 = {
+          ...cfg,
+          control_col: plant.secondary_control_col,
+          ref: plant.secondary_ref ?? 0,
+          y_limits: plant.secondary_y_limits ?? null,
+        };
+        result2 = analyzeResponse(parsed, cfg2);
+      } else {
+        result2 = null;
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-      rows = []; result = null;
+      rows = []; result = null; result2 = null;
     }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function clearAll() {
-    rows = []; result = null; error = '';
+    rows = []; result = null; result2 = null; error = '';
     fileName = ''; cachedCSVText = ''; cachedFileName = '';
     csvHeaders = null; headersMatch = false;
     selectedTimeCol = ''; selectedControlCol = '';
   }
 
   function clearResults() {
-    rows = []; result = null;
+    rows = []; result = null; result2 = null;
   }
 
   // ── Plant select ───────────────────────────────────────────────────────────
@@ -317,10 +331,22 @@
       time_col: selectedTimeCol,
       control_col: selectedControlCol,
     }}
+    {@const cfg2 = result2 && selectedPlant.secondary_control_col ? {
+      ...cfg,
+      control_col: selectedPlant.secondary_control_col,
+      ref: selectedPlant.secondary_ref ?? 0,
+      y_limits: selectedPlant.secondary_y_limits ?? null,
+    } : null}
     <section class="results-section" class:panel-collapsed={panelCollapsed}>
       <div class="chart-area">
         <ResponseChart {rows} config={cfg} {result} domain={selectedDomain} {chartHeight} />
       </div>
+
+      {#if cfg2 && result2}
+        <div class="chart-area" style="margin-top: 0.5rem;">
+          <ResponseChart {rows} config={cfg2} result={result2} domain={selectedDomain} {chartHeight} />
+        </div>
+      {/if}
 
       <div
         class="resize-separator"
@@ -334,7 +360,7 @@
       ><div class="resize-grip"><span></span></div></div>
 
       <div class="stats-area">
-        <StatsPanel {result} config={cfg} domain={selectedDomain} {rows} csvRaw={cachedCSVText} csvFileName={cachedFileName} />
+        <StatsPanel {result} result2={result2 ?? undefined} {cfg2} config={cfg} domain={selectedDomain} {rows} csvRaw={cachedCSVText} csvFileName={cachedFileName} />
       </div>
     </section>
   {/if}

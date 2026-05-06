@@ -4,14 +4,16 @@
 
   interface Props {
     result: AnalysisResult;
+    result2?: AnalysisResult | null;           // secondary variable (Yaw, Ángulo)
     config: PlantConfig & { experiment_start?: number };
+    cfg2?: (PlantConfig & { experiment_start?: number }) | null;  // config for secondary variable
     domain: 'continuo' | 'discreto';
     rows: Record<string, number>[];
     csvRaw: string;       // raw CSV text for fingerprint
     csvFileName: string;  // original filename shown in config section
   }
 
-  let { result, config, domain, rows, csvRaw, csvFileName }: Props = $props();
+  let { result, result2, config, cfg2, domain, rows, csvRaw, csvFileName }: Props = $props();
 
   // Google Sheets Web App URL — deploy your Apps Script as web app and paste here
   // SHEETS_URL set below
@@ -196,155 +198,176 @@
       const { Chart, registerables } = await import('chart.js');
       Chart.register(...registerables);
 
-      const expStart = config.experiment_start ?? 0;
-      const { t_obj, t_win, tol_st, tol_os, ref,
-              perturbation_start, perturbation_window,
-              control_col, time_col } = config;
+      const timeCol = config.time_col;
+      const timeArr = rows.map(r => r[timeCol]);
 
-      const timeArr = rows.map(r => r[time_col]);
-      const signal  = rows.map(r => r[control_col]);
-      const sm      = result.smoothed as number[];
-      const stLo = ref * (1 - tol_st), stHi = ref * (1 + tol_st), osHi = ref * (1 + tol_os);
-      const tObjAbs = expStart + t_obj;
-      const pertEnd = perturbation_start + perturbation_window;
-      const fullEnd = pertEnd + t_win + 1;
+      // ── Serial code — built from CSV fingerprint (primary signal) ─────────
+      const primarySignal = rows.map(r => r[config.control_col]);
+      serialCode = await buildSerial(primarySignal);
 
-      const vTobj  = { x: tObjAbs,           color: '#b07d00', dash: [5, 4], lbl: 't=' + t_obj + 's' };
-      const vPert  = { x: perturbation_start, color: '#6d4fc2', dash: [4, 4], lbl: 'PERT' };
-      const vPertE = { x: pertEnd,            color: '#5a4898', dash: [3, 5], lbl: 'fin' };
-      const bxEval = { x0: tObjAbs,           x1: tObjAbs + t_win, color: 'rgba(160,204,218,0.35)' };
-      const bxPert = { x0: perturbation_start, x1: pertEnd,         color: 'rgba(200,173,85,0.30)'  };
-      const bxRec  = { x0: pertEnd,            x1: pertEnd + t_win, color: 'rgba(130,166,177,0.28)' };
+      // ── Helper: render one page into jsPDF doc ────────────────────────────
+      async function renderPage(
+        doc: any,
+        pageResult: AnalysisResult,
+        pageCfg: typeof config,
+        pageSignal: number[],
+        pageLabel: string,
+        isFirstPage: boolean,
+      ) {
+        if (!isFirstPage) doc.addPage();
 
-      const S = (title: string, ts: number, te: number, vl: typeof vTobj[], bx: typeof bxEval[]) =>
-        renderSnap(Chart, title, ts, te, timeArr, signal, sm, expStart, ref, stLo, stHi, osHi, vl, bx);
+        const expStart = pageCfg.experiment_start ?? 0;
+        const { t_obj, t_win, tol_st, tol_os, ref,
+                perturbation_start, perturbation_window } = pageCfg;
+        const sm      = pageResult.smoothed as number[];
+        const stLo = ref * (1 - tol_st), stHi = ref * (1 + tol_st), osHi = ref * (1 + tol_os);
+        const tObjAbs = expStart + t_obj;
+        const pertEnd = perturbation_start + perturbation_window;
+        const fullEnd = pertEnd + t_win + 1;
 
-      const [png1, png2, png3, png4] = await Promise.all([
-        S('Respuesta completa ' + config.label,
-          expStart, fullEnd, [vTobj, vPert, vPertE], [bxEval, bxPert, bxRec]),
-        S('Settling t_obj=' + t_obj + 's banda +-' + (tol_st * 100).toFixed(0) + '%',
-          expStart, Math.min(tObjAbs + t_win * 1.3, perturbation_start - 0.1), [vTobj], [bxEval]),
-        S('Sobreimpulso limite +-' + (tol_os * 100).toFixed(1) + '%',
-          expStart, Math.min(tObjAbs + t_win * 0.6, perturbation_start - 0.1), [], []),
-        S('Perturbacion inicio=' + perturbation_start + 's ventana=' + perturbation_window + 's',
-          perturbation_start - 0.5, pertEnd + t_win + 0.5, [vPert, vPertE], [bxPert, bxRec]),
-      ]);
+        const vTobj  = { x: tObjAbs,           color: '#b07d00', dash: [5, 4], lbl: 't=' + t_obj + 's' };
+        const vPert  = { x: perturbation_start, color: '#6d4fc2', dash: [4, 4], lbl: 'PERT' };
+        const vPertE = { x: pertEnd,            color: '#5a4898', dash: [3, 5], lbl: 'fin' };
+        const bxEval = { x0: tObjAbs,           x1: tObjAbs + t_win, color: 'rgba(160,204,218,0.35)' };
+        const bxPert = { x0: perturbation_start, x1: pertEnd,         color: 'rgba(200,173,85,0.30)'  };
+        const bxRec  = { x0: pertEnd,            x1: pertEnd + t_win, color: 'rgba(130,166,177,0.28)' };
 
-      // ── Serial code — built from CSV fingerprint ──────────────────────────
-      serialCode   = await buildSerial(signal);
+        const S = (title: string, ts: number, te: number, vl: typeof vTobj[], bx: typeof bxEval[]) =>
+          renderSnap(Chart, title, ts, te, timeArr, pageSignal, sm, expStart, ref, stLo, stHi, osHi, vl, bx);
 
-      // ── Layout PDF ────────────────────────────────────────────────────────
+        const [png1, png2, png3, png4] = await Promise.all([
+          S('Respuesta completa ' + pageCfg.label + ' – ' + pageLabel,
+            expStart, fullEnd, [vTobj, vPert, vPertE], [bxEval, bxPert, bxRec]),
+          S('Settling t_obj=' + t_obj + 's banda +-' + (tol_st * 100).toFixed(0) + '%',
+            expStart, Math.min(tObjAbs + t_win * 1.3, perturbation_start - 0.1), [vTobj], [bxEval]),
+          S('Sobreimpulso limite +-' + (tol_os * 100).toFixed(1) + '%',
+            expStart, Math.min(tObjAbs + t_win * 0.6, perturbation_start - 0.1), [], []),
+          S('Perturbacion inicio=' + perturbation_start + 's ventana=' + perturbation_window + 's',
+            perturbation_start - 0.5, pertEnd + t_win + 0.5, [vPert, vPertE], [bxPert, bxRec]),
+        ]);
+
+        const PW = 297, PH = 210, M = 12;
+        const safe = (s: string) => s.replace(/[^\x00-\x7F]/g, ' ').replace(/  +/g, ' ').trim();
+        const now = new Date().toLocaleString('es-CR', { dateStyle: 'short', timeStyle: 'short' });
+
+        // Header
+        doc.setDrawColor(60, 60, 60); doc.setLineWidth(0.2); doc.line(M, 8, PW - M, 8);
+        doc.setTextColor(40, 40, 40); doc.setFont('courier', 'bold'); doc.setFontSize(10);
+        doc.text('SELF-CHECKER', M, 6);
+        doc.setFont('courier', 'normal'); doc.setFontSize(7.5); doc.setTextColor(100, 100, 100);
+        doc.text(pageCfg.label + ' – ' + pageLabel + '  |  ' + domain.toUpperCase() + '  |  ' + (teamName || '—') + '  |  ' + now, PW - M, 6, { align: 'right' });
+
+        // Score
+        const sc = pageResult.final_score;
+        const sRgb = sc >= 90 ? [34,197,94] as const : sc >= 70 ? [202,138,4] as const : [220,38,38] as const;
+        doc.setFont('courier', 'bold'); doc.setFontSize(9); doc.setTextColor(...sRgb);
+        doc.text(sc.toFixed(1), M, 14.5);
+        doc.setTextColor(80, 80, 80); doc.setFont('courier', 'normal'); doc.setFontSize(7.5);
+        doc.text('/ 100', M + 9, 14.5);
+        let sx = M + 28;
+        [
+          { lbl: 'ST', v: pageResult.ST_score }, { lbl: 'OS', v: pageResult.OS_score },
+          { lbl: 'ESS', v: pageResult.ESS_score }, { lbl: 'PERT', v: pageResult.Pert_score },
+        ].forEach(({ lbl, v }) => {
+          const rgb = v >= 90 ? [34,197,94] as const : v >= 70 ? [202,138,4] as const : [220,38,38] as const;
+          doc.setTextColor(110,110,110); doc.setFontSize(6.5); doc.text(lbl, sx, 12.5);
+          doc.setTextColor(...rgb); doc.setFontSize(8); doc.setFont('courier','bold');
+          doc.text(v.toFixed(0), sx, 16); doc.setFont('courier','normal'); sx += 18;
+        });
+        doc.setDrawColor(210,210,210); doc.setLineWidth(0.15); doc.line(M, 18, PW - M, 18);
+
+        // Charts 2×2
+        const gridTop = 20, gridH = PH - gridTop - 46;
+        const cW = (PW - M * 2 - 3) / 2, cH = gridH / 2;
+        const pos = [
+          { x: M,          y: gridTop },
+          { x: M + cW + 3, y: gridTop },
+          { x: M,          y: gridTop + cH + 2 },
+          { x: M + cW + 3, y: gridTop + cH + 2 },
+        ];
+        [png1, png2, png3, png4].forEach((png, i) => {
+          doc.addImage(png, 'JPEG', pos[i].x, pos[i].y, cW, cH);
+          doc.setDrawColor(210,210,210); doc.setLineWidth(0.12);
+          doc.rect(pos[i].x, pos[i].y, cW, cH);
+        });
+
+        // Comments
+        const commY = gridTop + gridH + 4;
+        doc.setDrawColor(210,210,210); doc.setLineWidth(0.15); doc.line(M, commY - 1, PW - M, commY - 1);
+        const colW2 = (PW - M * 2 - 6) / 2;
+        [
+          { lbl: 'ST',   txt: pageResult.ST_comment,      score: pageResult.ST_score   },
+          { lbl: 'OS',   txt: pageResult.OS_comment,      score: pageResult.OS_score   },
+          { lbl: 'ESS',  txt: pageResult.ESS_pre_comment, score: pageResult.ESS_score  },
+          { lbl: 'PERT', txt: pageResult.Pert_comment,    score: pageResult.Pert_score },
+        ].forEach(({ lbl, txt, score }, i) => {
+          const cx = M + (i % 2) * (colW2 + 6), cy = commY + 4 + Math.floor(i / 2) * 9;
+          const rgb = score >= 90 ? [34,197,94] as const : score >= 70 ? [202,138,4] as const : [220,38,38] as const;
+          doc.setFont('courier','bold'); doc.setFontSize(6.5); doc.setTextColor(...rgb);
+          doc.text(lbl + ' ' + score.toFixed(0), cx, cy);
+          doc.setFont('courier','normal'); doc.setFontSize(6); doc.setTextColor(100,100,100);
+          doc.text(safe(txt.length > 110 ? txt.slice(0, 110) : txt), cx, cy + 4, { maxWidth: colW2 - 2 });
+        });
+
+        // Warnings
+        const warns = [pageResult.exp_start_warning, pageResult.pert_warning, pageResult.ess_step_warning].filter(Boolean) as string[];
+        warns.forEach((w, i) => {
+          doc.setTextColor(180,120,20); doc.setFontSize(5.8);
+          doc.text('! ' + safe(w.slice(0, 160)), M, commY + 19 + i * 4, { maxWidth: PW - M * 2 });
+        });
+
+        // Config
+        const cfgY = commY + 22;
+        doc.setDrawColor(220,220,220); doc.setLineWidth(0.1);
+        doc.line(M, cfgY - 1, PW - M, cfgY - 1);
+        doc.setFont('courier','bold'); doc.setFontSize(5.5); doc.setTextColor(140,140,140);
+        doc.text('CONFIGURACION', M, cfgY + 2.5);
+        const cfgStr = [
+          'var='        + pageLabel,
+          'p_id='       + pageCfg.id,
+          'ref='        + ref,
+          'tol_st='     + (tol_st  * 100).toFixed(1) + '%',
+          'tol_os='     + (tol_os  * 100).toFixed(1) + '%',
+          'ess_tol='    + (pageCfg.ess_tol * 100).toFixed(1) + '%',
+          'ess_k='      + pageCfg.ess_k_win,
+          't_obj='      + t_obj    + 's',
+          't_win='      + t_win    + 's',
+          'pert_start=' + perturbation_start + 's',
+          'pert_win='   + perturbation_window + 's',
+          'rec_tol='    + ((pageCfg as any).pert_recovery_tol * 100).toFixed(1) + '%',
+          'exp_ini='    + expStart + 's',
+          'dominio='    + domain,
+          'csv='        + csvFileName,
+        ].join('  ');
+        doc.setFont('courier','normal'); doc.setFontSize(5); doc.setTextColor(155,155,155);
+        doc.text(cfgStr, M, cfgY + 6, { maxWidth: PW - M * 2 });
+
+        // Footer
+        doc.setTextColor(150,150,150); doc.setFontSize(5.5);
+        doc.text('Self Checker — IE TEC', M, PH - 2);
+        doc.setFont('courier','normal'); doc.setFontSize(4.8); doc.setTextColor(175,175,175);
+        doc.text(serialCode, PW - M, PH - 2, { align: 'right' });
+      }
+
+      // ── Build PDF (1 or 2 pages) ──────────────────────────────────────────
       const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-      const PW = 297, PH = 210, M = 12;
 
-      const safe = (s: string) => s.replace(/[^\x00-\x7F]/g, ' ').replace(/  +/g, ' ').trim();
+      const primaryLabel = config.control_col;
+      const secondaryLabel2 = (config as any).secondary_label ?? cfg2?.control_col ?? 'Variable 2';
 
-      // Header
-      doc.setDrawColor(60, 60, 60); doc.setLineWidth(0.2); doc.line(M, 8, PW - M, 8);
-      doc.setTextColor(40, 40, 40); doc.setFont('courier', 'bold'); doc.setFontSize(10);
-      doc.text('SELF-CHECKER', M, 6);
-      doc.setFont('courier', 'normal'); doc.setFontSize(7.5); doc.setTextColor(100, 100, 100);
-      const now = new Date().toLocaleString('es-CR', { dateStyle: 'short', timeStyle: 'short' });
-      doc.text(config.label + '  |  ' + domain.toUpperCase() + '  |  ' + (teamName || '—') + '  |  ' + now, PW - M, 6, { align: 'right' });
+      await renderPage(doc, result, config, primarySignal, primaryLabel, true);
 
-      // Score
-      const sc = result.final_score;
-      const sRgb = sc >= 90 ? [34,197,94] as const : sc >= 70 ? [202,138,4] as const : [220,38,38] as const;
-      doc.setFont('courier', 'bold'); doc.setFontSize(9); doc.setTextColor(...sRgb);
-      doc.text(sc.toFixed(1), M, 14.5);
-      doc.setTextColor(80, 80, 80); doc.setFont('courier', 'normal'); doc.setFontSize(7.5);
-      doc.text('/ 100', M + 9, 14.5);
-      let sx = M + 28;
-      [
-        { lbl: 'ST', v: result.ST_score }, { lbl: 'OS', v: result.OS_score },
-        { lbl: 'ESS', v: result.ESS_score }, { lbl: 'PERT', v: result.Pert_score },
-      ].forEach(({ lbl, v }) => {
-        const rgb = v >= 90 ? [34,197,94] as const : v >= 70 ? [202,138,4] as const : [220,38,38] as const;
-        doc.setTextColor(110,110,110); doc.setFontSize(6.5); doc.text(lbl, sx, 12.5);
-        doc.setTextColor(...rgb); doc.setFontSize(8); doc.setFont('courier','bold');
-        doc.text(v.toFixed(0), sx, 16); doc.setFont('courier','normal'); sx += 18;
-      });
-      doc.setDrawColor(210,210,210); doc.setLineWidth(0.15); doc.line(M, 18, PW - M, 18);
+      if (result2 && cfg2) {
+        const signal2 = rows.map(r => r[cfg2.control_col]);
+        await renderPage(doc, result2, cfg2, signal2, secondaryLabel2, false);
+      }
 
-      // Charts 2×2
-      const gridTop = 20, gridH = PH - gridTop - 46;  // 46mm reserved for comments+config+footer
-      const cW = (PW - M * 2 - 3) / 2, cH = gridH / 2;
-      const pos = [
-        { x: M,          y: gridTop },
-        { x: M + cW + 3, y: gridTop },
-        { x: M,          y: gridTop + cH + 2 },
-        { x: M + cW + 3, y: gridTop + cH + 2 },
-      ];
-      [png1, png2, png3, png4].forEach((png, i) => {
-        doc.addImage(png, 'JPEG', pos[i].x, pos[i].y, cW, cH);
-        doc.setDrawColor(210,210,210); doc.setLineWidth(0.12);
-        doc.rect(pos[i].x, pos[i].y, cW, cH);
-      });
-
-      // Comments
-      const commY = gridTop + gridH + 4;
-      doc.setDrawColor(210,210,210); doc.setLineWidth(0.15); doc.line(M, commY - 1, PW - M, commY - 1);
-      const colW2 = (PW - M * 2 - 6) / 2;
-      [
-        { lbl: 'ST',   txt: result.ST_comment,      score: result.ST_score   },
-        { lbl: 'OS',   txt: result.OS_comment,      score: result.OS_score   },
-        { lbl: 'ESS',  txt: result.ESS_pre_comment, score: result.ESS_score  },
-        { lbl: 'PERT', txt: result.Pert_comment,    score: result.Pert_score },
-      ].forEach(({ lbl, txt, score }, i) => {
-        const cx = M + (i % 2) * (colW2 + 6), cy = commY + 4 + Math.floor(i / 2) * 9;
-        const rgb = score >= 90 ? [34,197,94] as const : score >= 70 ? [202,138,4] as const : [220,38,38] as const;
-        doc.setFont('courier','bold'); doc.setFontSize(6.5); doc.setTextColor(...rgb);
-        doc.text(lbl + ' ' + score.toFixed(0), cx, cy);
-        doc.setFont('courier','normal'); doc.setFontSize(6); doc.setTextColor(100,100,100);
-        doc.text(safe(txt.length > 110 ? txt.slice(0, 110) : txt), cx, cy + 4, { maxWidth: colW2 - 2 });
-      });
-
-      // Warnings
-      const warns = [result.exp_start_warning, result.pert_warning, result.ess_step_warning].filter(Boolean) as string[];
-      warns.forEach((w, i) => {
-        doc.setTextColor(180,120,20); doc.setFontSize(5.8);
-        doc.text('! ' + safe(w.slice(0, 160)), M, commY + 19 + i * 4, { maxWidth: PW - M * 2 });
-      });
-
-      // ── Config section — small table below comments ─────────────────────
-      const cfgY = commY + 22;
-      doc.setDrawColor(220,220,220); doc.setLineWidth(0.1);
-      doc.line(M, cfgY - 1, PW - M, cfgY - 1);
-      doc.setFont('courier','bold'); doc.setFontSize(5.5); doc.setTextColor(140,140,140);
-      doc.text('CONFIGURACION', M, cfgY + 2.5);
-      doc.setFont('courier','normal'); doc.setFontSize(5.2); doc.setTextColor(160,160,160);
-      // Config as compact key=value pairs on one line
-      const cfgStr = [
-        'p_id='       + config.id,
-        'ref='        + config.ref,
-        'tol_st='     + (config.tol_st  * 100).toFixed(1) + '%',
-        'tol_os='     + (config.tol_os  * 100).toFixed(1) + '%',
-        'ess_tol='    + (config.ess_tol * 100).toFixed(1) + '%',
-        'ess_k='      + config.ess_k_win,
-        't_obj='      + config.t_obj    + 's',
-        't_win='      + config.t_win    + 's',
-        'pert_start=' + config.perturbation_start + 's',
-        'pert_win='   + config.perturbation_window + 's',
-        'rec_tol='    + ((config as any).pert_recovery_tol * 100).toFixed(1) + '%',
-        'exp_ini='    + (config.experiment_start ?? 0) + 's',
-        'dominio='    + domain,
-        'csv='        + csvFileName,
-      ].join('  ');
-      doc.setFont('courier','normal'); doc.setFontSize(5); doc.setTextColor(155,155,155);
-      doc.text(cfgStr, M, cfgY + 6, { maxWidth: PW - M * 2 });
-
-      // ── Footer
-      doc.setTextColor(150,150,150); doc.setFontSize(5.5);
-      doc.text('Self Checker — IE TEC', M, PH - 2);
-      doc.setFont('courier','normal'); doc.setFontSize(4.8); doc.setTextColor(175,175,175);
-      doc.text(serialCode, PW - M, PH - 2, { align: 'right' });
-
-      // Embed serial silently in PDF metadata (not visible in reader)
+      // Metadata
       (doc as any).setDocumentProperties?.({
         title:    'Self-Checker ' + config.label + ' ' + domain,
         author:   teamName.trim() || 'unknown',
         subject:  teamName.trim() || '—',
-        keywords: serialCode,   // serial lives here — invisible to students
+        keywords: serialCode,
         creator:  'Self Checker IE TEC',
       });
 
@@ -367,7 +390,6 @@
         csv_file:   csvFileName,
       };
       try {
-        // GET with query params — works reliably with no-cors (POST body gets dropped by browser)
         const params = new URLSearchParams(logPayload as any).toString();
         await fetch(SHEETS_URL + '?' + params, { method: 'GET', mode: 'no-cors' });
       } catch (_) { /* log failure is non-fatal */ }

@@ -5,14 +5,21 @@
 
   interface Props {
     result: AnalysisResult;
+    result2?: AnalysisResult;           // secondary variable (Yaw, Ángulo, etc.)
     config: PlantConfig & { experiment_start?: number };
+    cfg2?: (PlantConfig & { experiment_start?: number }) | null;  // config for secondary variable
     domain: 'continuo' | 'discreto';
     rows: Record<string, number>[];
     csvRaw: string;       // raw CSV text — used for fingerprint hash
     csvFileName: string;  // original filename — shown in PDF config section
   }
 
-  let { result, config, domain, rows, csvRaw, csvFileName }: Props = $props();
+  let { result, result2, config, cfg2, domain, rows, csvRaw, csvFileName }: Props = $props();
+
+  const secondaryLabel = $derived(
+    (config as any).secondary_label ?? cfg2?.control_col ?? config.secondary_control_col ?? 'Variable 2'
+  );
+  const primaryLabel = $derived(config.control_col);
 
   function scoreClass(score: number): string {
     if (score >= 90) return 'ok';
@@ -26,33 +33,28 @@
 
   const unit = 's';  // always seconds
   const r = $derived(result as any);
+  const r2 = $derived(result2 as any);
 </script>
 
-<div class="stats-panel">
 
-  <div class="panel-header">
-    <span class="panel-title">RESULTADO DE REVISION</span>
-    <div class="header-tags">
-      {#if r.ma_window}
-        <span class="tag muted">MA={r.ma_window}</span>
-      {/if}
-      <span class="tag">{domain.toUpperCase()}</span>
-      <ReportGenerator {result} {config} {domain} {rows} {csvRaw} {csvFileName} />
-    </div>
+{#snippet varStats(res: AnalysisResult, cfg: PlantConfig & { experiment_start?: number }, rx: any, varLabel: string)}
+  <div class="var-header">
+    <span class="var-label">{varLabel}</span>
+    <span class="var-ref">ref = {cfg.ref}</span>
   </div>
 
   <div class="score-row">
     <span class="score-label">NOTA FINAL</span>
-    <span class="score-value {scoreClass(result.final_score)}">{fmt(result.final_score, 1)} / 100</span>
+    <span class="score-value {scoreClass(res.final_score)}">{fmt(res.final_score, 1)} / 100</span>
   </div>
 
   <!-- Score breakdown bars -->
   <div class="breakdown-bars">
     {#each [
-      { label: 'ST',   score: result.ST_score,   weight: config.weights.ST },
-      { label: 'OS',   score: result.OS_score,   weight: config.weights.OS },
-      { label: 'ESS',  score: result.ESS_score,  weight: config.weights.ESS },
-      { label: 'PERT', score: result.Pert_score, weight: config.weights.Pert },
+      { label: 'ST',   score: res.ST_score,   weight: cfg.weights.ST },
+      { label: 'OS',   score: res.OS_score,   weight: cfg.weights.OS },
+      { label: 'ESS',  score: res.ESS_score,  weight: cfg.weights.ESS },
+      { label: 'PERT', score: res.Pert_score, weight: cfg.weights.Pert },
     ] as item}
       <div class="bar-row">
         <span class="bar-label">{item.label}</span>
@@ -76,80 +78,77 @@
       </tr>
     </thead>
     <tbody>
-
       <!-- Settling Time -->
       <tr>
         <td class="crit-name">SETTLING<br/>TIME</td>
         <td>
-          {#if result.settling_time_actual !== null}
-            T_st = {fmt(result.settling_time_actual)}{unit} (desde inicio)<br />
+          {#if res.settling_time_actual !== null}
+            T_st = {fmt(res.settling_time_actual)}{unit} (desde inicio)<br />
           {:else}
             <span class="fail-text">NO CONVERGE</span><br />
           {/if}
-          {fmt(result.ST_prop_ok * 100, 1)}% en banda<br />
-          {#if result.rise_time !== null}
-            T_r = {fmt(result.rise_time)}{unit} (desde inicio)
+          {fmt(res.ST_prop_ok * 100, 1)}% en banda<br />
+          {#if res.rise_time !== null}
+            T_r = {fmt(res.rise_time)}{unit} (desde inicio)
           {/if}
         </td>
-        <td class="{scoreClass(result.ST_score)}">{fmt(result.ST_score, 1)}</td>
+        <td class="{scoreClass(res.ST_score)}">{fmt(res.ST_score, 1)}</td>
       </tr>
 
       <!-- Overshoot -->
       <tr>
         <td class="crit-name">OVERSHOOT</td>
         <td>
-          pico = {fmt(r.OS_val ?? result.OS_val)}<br />
-          OS%  = {fmt(Math.max(0, (result.OS_val - config.ref) / config.ref) * 100, 2)}%<br />
-          lím  = ±{fmt(config.tol_os * 100, 1)}%
+          pico = {fmt(rx.OS_val ?? res.OS_val)}<br />
+          OS%  = {fmt(Math.max(0, (res.OS_val - cfg.ref) / cfg.ref) * 100, 2)}%<br />
+          lím  = ±{fmt(cfg.tol_os * 100, 1)}%
         </td>
-        <td class="{scoreClass(result.OS_score)}">{fmt(result.OS_score, 1)}</td>
+        <td class="{scoreClass(res.OS_score)}">{fmt(res.OS_score, 1)}</td>
       </tr>
 
-      <!-- ESS pre (único, peso completo) -->
+      <!-- ESS pre -->
       <tr>
         <td class="crit-name">ESS</td>
         <td>
-          IAE  = {fmt(r.ESS_pre_iae ?? 0, 3)} (norm)<br />
-          fuera = {fmt(r.ESS_pre_pct_out ?? 0, 1)}% del tiempo<br />
-          mean = {fmt(result.ESS_pre.mean)} · err={fmt(result.ESS_pre.error_pct, 3)}%<br />
-          <span class="sub-detail">últimas {config.ess_k_win} muestras pre-pert · suavizada · peso {config.weights.ESS}%</span>
+          IAE  = {fmt(rx.ESS_pre_iae ?? 0, 3)} (norm)<br />
+          fuera = {fmt(rx.ESS_pre_pct_out ?? 0, 1)}% del tiempo<br />
+          mean = {fmt(res.ESS_pre.mean)} · err={fmt(res.ESS_pre.error_pct, 3)}%<br />
+          <span class="sub-detail">últimas {cfg.ess_k_win} muestras pre-pert · peso {cfg.weights.ESS}%</span>
         </td>
-        <td class="{scoreClass(result.ESS_score)}">{fmt(result.ESS_score, 1)}</td>
+        <td class="{scoreClass(res.ESS_score)}">{fmt(res.ESS_score, 1)}</td>
       </tr>
 
-      <!-- Perturbation settling -->
+      <!-- Pert Settling -->
       <tr>
         <td class="crit-name">PERT<br/>SETTLING</td>
         <td>
-          {#if r.Pert_ST_prop_ok !== undefined}
-            {fmt(r.Pert_ST_prop_ok * 100, 1)}% en banda<br />
+          {#if rx.Pert_ST_prop_ok !== undefined}
+            {fmt(rx.Pert_ST_prop_ok * 100, 1)}% en banda<br />
           {/if}
-          ventana [t+{fmt(config.perturbation_window)}, t+{fmt(config.perturbation_window + config.t_win)}]{unit}<br />
-          <span class="sub-detail">1/3 del peso · suavizada</span>
+          ventana [t+{fmt(cfg.perturbation_window)}, t+{fmt(cfg.perturbation_window + cfg.t_win)}]{unit}<br />
+          <span class="sub-detail">1/3 del peso</span>
         </td>
-        <td class="{scoreClass(r.Pert_ST_score ?? 0)}">{fmt(r.Pert_ST_score ?? 0, 1)}</td>
+        <td class="{scoreClass(rx.Pert_ST_score ?? 0)}">{fmt(rx.Pert_ST_score ?? 0, 1)}</td>
       </tr>
 
-      <!-- ESS post — va dentro de PERT -->
+      <!-- ESS post -->
       <tr>
         <td class="crit-name">PERT<br/>ESS</td>
         <td>
-          IAE  = {fmt(r.ESS_post_iae ?? 0, 3)} (norm)<br />
-          fuera = {fmt(r.ESS_post_pct_out ?? 0, 1)}% del tiempo<br />
-          mean = {fmt(result.ESS_post.mean)} · err={fmt(result.ESS_post.error_pct, 3)}%<br />
-          <span class="sub-detail">últimas {config.ess_k_win} muestras (ventana post-pert) · 1/3 del peso PERT</span>
+          IAE  = {fmt(rx.ESS_post_iae ?? 0, 3)} (norm)<br />
+          fuera = {fmt(rx.ESS_post_pct_out ?? 0, 1)}% del tiempo<br />
+          mean = {fmt(res.ESS_post.mean)} · err={fmt(res.ESS_post.error_pct, 3)}%<br />
+          <span class="sub-detail">1/3 del peso PERT</span>
         </td>
-        <td class="{scoreClass(result.ESS_post_score)}">{fmt(result.ESS_post_score, 1)}</td>
+        <td class="{scoreClass(res.ESS_post_score)}">{fmt(res.ESS_post_score, 1)}</td>
       </tr>
 
-      <!-- Perturbation combined -->
+      <!-- Pert combinado -->
       <tr class="combined-row">
         <td class="crit-name">PERT<br/>COMBINADO</td>
-        <td>(detectada + settling + ESS_post) / 3 · peso {config.weights.Pert}%</td>
-        <td class="{scoreClass(result.Pert_score)}">{fmt(result.Pert_score, 1)}</td>
+        <td>(detectada + settling + ESS_post) / 3 · peso {cfg.weights.Pert}%</td>
+        <td class="{scoreClass(res.Pert_score)}">{fmt(res.Pert_score, 1)}</td>
       </tr>
-
-
     </tbody>
   </table>
 
@@ -157,32 +156,102 @@
 
   <div class="comments">
     <span class="comments-title">OBSERVACIONES</span>
-    {#if result.exp_start_warning}
-      <pre class="comment-line warn-line">> {result.exp_start_warning}</pre>
+    {#if res.exp_start_warning}
+      <pre class="comment-line warn-line">> {res.exp_start_warning}</pre>
     {/if}
-    {#if result.pert_warning}
-      <pre class="comment-line warn-line">> {result.pert_warning}</pre>
+    {#if res.pert_warning}
+      <pre class="comment-line warn-line">> {res.pert_warning}</pre>
     {/if}
-    {#if result.ess_step_warning}
-      <pre class="comment-line warn-line">> {result.ess_step_warning}</pre>
+    {#if res.ess_step_warning}
+      <pre class="comment-line warn-line">> {res.ess_step_warning}</pre>
     {/if}
-    <pre class="comment-line">> {result.ST_comment}</pre>
-    <pre class="comment-line">> {result.OS_comment}</pre>
-
-    <pre class="comment-line">> {result.ESS_pre_comment}</pre>
-    <pre class="comment-line">> {result.ESS_post_comment}</pre>
-    <pre class="comment-line">> {result.Pert_comment}</pre>
-    {#if r.Pert_ST_comment}
-      <pre class="comment-line">> {r.Pert_ST_comment}</pre>
+    <pre class="comment-line">> {res.ST_comment}</pre>
+    <pre class="comment-line">> {res.OS_comment}</pre>
+    <pre class="comment-line">> {res.ESS_pre_comment}</pre>
+    <pre class="comment-line">> {res.ESS_post_comment}</pre>
+    <pre class="comment-line">> {res.Pert_comment}</pre>
+    {#if rx.Pert_ST_comment}
+      <pre class="comment-line">> {rx.Pert_ST_comment}</pre>
     {/if}
-    {#if r.Pert_ESS_comment}
-      <pre class="comment-line">> {r.Pert_ESS_comment}</pre>
+    {#if rx.Pert_ESS_comment}
+      <pre class="comment-line">> {rx.Pert_ESS_comment}</pre>
     {/if}
   </div>
+{/snippet}
+
+<div class="stats-panel">
+
+  <div class="panel-header">
+    <span class="panel-title">RESULTADO DE REVISION</span>
+    <div class="header-tags">
+      {#if r.ma_window}
+        <span class="tag muted">MA={r.ma_window}</span>
+      {/if}
+      <span class="tag">{domain.toUpperCase()}</span>
+      <ReportGenerator {result} {result2} {config} {cfg2} {domain} {rows} {csvRaw} {csvFileName} />
+    </div>
+  </div>
+
+  {#if result2 && cfg2}
+    <div class="dual-col">
+      <div class="var-col">
+        {@render varStats(result, config, r, primaryLabel)}
+      </div>
+      <div class="col-divider"></div>
+      <div class="var-col">
+        {@render varStats(result2, cfg2, r2, secondaryLabel)}
+      </div>
+    </div>
+  {:else}
+    {@render varStats(result, config, r, primaryLabel)}
+  {/if}
 
 </div>
 
 <style>
+  /* ── Dual variable layout ───────────────────────────────────────── */
+  .dual-col {
+    display: grid;
+    grid-template-columns: 1fr 1px 1fr;
+    gap: 0;
+  }
+
+  .var-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0 0.8rem;
+  }
+
+  .var-col:first-child { padding-left: 0; }
+  .var-col:last-child  { padding-right: 0; }
+
+  .col-divider {
+    background: var(--border, #333);
+    align-self: stretch;
+  }
+
+  .var-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding-bottom: 0.2rem;
+    border-bottom: 1px solid var(--border, #222);
+  }
+
+  .var-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    color: var(--foreground, #e5e5e5);
+    text-transform: uppercase;
+  }
+
+  .var-ref {
+    font-size: 0.6rem;
+    color: var(--muted-foreground, #666);
+  }
+
   .stats-panel {
     font-family: 'Courier New', Courier, monospace;
     font-size: 0.75rem;

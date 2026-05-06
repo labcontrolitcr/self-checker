@@ -116,6 +116,13 @@ export interface PlantConfig {
   };
 
   y_limits: [number, number] | null;  // Y axis [min, max], null = auto
+
+  // Optional second variable to evaluate independently (e.g. Yaw in Heli2DOF, Angulo in Grúa)
+  secondary_control_col?: string;
+  secondary_ref?: number;
+  secondary_y_limits?: [number, number] | null;
+  secondary_label?: string;  // display name override (default: secondary_control_col)
+
   domains: ('continuo' | 'discreto')[];
   exp_start_t: Partial<Record<'continuo' | 'discreto', number>>;  // experiment start time per domain (default 0)
   chart_config?: Partial<ChartConfig>;  // optional per-plant visual overrides
@@ -176,7 +183,11 @@ export const plants: PlantConfig[] = [
   {
     id: 'grua',
     label: 'Grúa',
-    available: false,
+    available: true,
+    secondary_control_col: 'Angulo',
+    secondary_ref: 0.0,
+    secondary_y_limits: null,
+    secondary_label: 'Ángulo',
     csv_cols: ['Tiempo', 'Posicion', 'Angulo', 'Entrada'],
     time_col: 'Tiempo',
     control_col: 'Posicion',
@@ -235,11 +246,15 @@ export const plants: PlantConfig[] = [
   {
     id: 'heli_2dof',
     label: 'Heli 2DOF',
-    available: false,
+    available: true,
     csv_cols: ['Tiempo', 'Pitch', 'Yaw', 'Entrada'],
     time_col: 'Tiempo',
     control_col: 'Pitch',
     ref: 15.0,
+    secondary_control_col: 'Yaw',
+    secondary_ref: 0.0,
+    secondary_y_limits: null,
+    secondary_label: 'Yaw',
     tol_st: 0.02,
     t_obj: 2.5,
     t_win: 2.0,
