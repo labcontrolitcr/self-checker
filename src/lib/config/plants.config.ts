@@ -265,7 +265,7 @@ export const plants: PlantConfig[] = [
     csv_cols: ['Tiempo', 'Pitch', 'Yaw', 'Entrada'],
     time_col: 'Tiempo',
     control_col: 'Pitch',
-    ref: 15.0,
+    ref: 0.0,
     secondary_control_col: 'Yaw',
     secondary_ref: 0.0,
     secondary_y_limits: [-0.2, 0.2],
