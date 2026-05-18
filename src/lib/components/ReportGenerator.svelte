@@ -92,9 +92,10 @@
     expStart: number, ref: number, stLo: number, stHi: number, osHi: number,
     vLines: { x: number; color: string; dash: number[]; lbl: string }[],
     boxes: { x0: number; x1: number; color: string }[],
+    snapCfg: typeof config = config,
   ): Promise<string> {
     const CW = 1600, CH = 900, SF = CW / 800;
-    const ctrl = config.control_col;
+    const ctrl = snapCfg.control_col;
 
     const si    = Math.max(0, timeArr.findIndex(t => t >= tStart));
     const ei0   = timeArr.findIndex(t => t > tEnd);
@@ -166,8 +167,8 @@
       data: {
         labels: tSl,
         datasets: [
-          { label: ctrl, data: rawSl, borderColor: config.smooth !== false ? 'rgba(130,60,200,0.30)' : 'rgba(130,60,200,0.85)', borderWidth: 1.5 * SF, pointRadius: 0, tension: 0 },
-          { label: 'sm', data: smSl,  borderColor: config.smooth !== false ? 'rgba(120,20,100,0.85)' : 'transparent',              borderWidth: 2.5 * SF, pointRadius: 0, tension: 0 },
+          { label: ctrl, data: rawSl, borderColor: snapCfg.smooth !== false ? 'rgba(130,60,200,0.30)' : 'rgba(130,60,200,0.85)', borderWidth: 1.5 * SF, pointRadius: 0, tension: 0 },
+          { label: 'sm', data: smSl,  borderColor: snapCfg.smooth !== false ? 'rgba(120,20,100,0.85)' : 'transparent',              borderWidth: 2.5 * SF, pointRadius: 0, tension: 0 },
         ]
       },
       options: {
@@ -179,7 +180,7 @@
         },
         scales: {
           x: { type: 'linear', ticks: { font: { family: 'Courier New', size: fs }, color: '#444', maxTicksLimit: 10, maxRotation: 0 }, grid: { color: 'rgba(0,0,0,0.06)' }, border: { color: 'rgba(0,0,0,0.15)' }, title: { display: true, text: 'Tiempo (s)', font: { family: 'Courier New', size: fs }, color: '#333' } },
-          y: { ticks: { font: { family: 'Courier New', size: fs }, color: '#444' }, grid: { color: 'rgba(0,0,0,0.06)' }, border: { color: 'rgba(0,0,0,0.15)' }, title: { display: true, text: ctrl, font: { family: 'Courier New', size: fs }, color: '#333' }, ...(config.y_limits ? { min: config.y_limits[0], max: config.y_limits[1] } : {}) }
+          y: { ticks: { font: { family: 'Courier New', size: fs }, color: '#444' }, grid: { color: 'rgba(0,0,0,0.06)' }, border: { color: 'rgba(0,0,0,0.15)' }, title: { display: true, text: ctrl, font: { family: 'Courier New', size: fs }, color: '#333' }, ...(snapCfg.y_limits ? { min: snapCfg.y_limits[0], max: snapCfg.y_limits[1] } : {}) }
         }
       },
       plugins: [overlay],
@@ -236,7 +237,7 @@
         const bxRec  = { x0: pertEnd,            x1: pertEnd + t_win, color: 'rgba(130,166,177,0.28)' };
 
         const S = (title: string, ts: number, te: number, vl: typeof vTobj[], bx: typeof bxEval[]) =>
-          renderSnap(Chart, title, ts, te, timeArr, pageSignal, sm, expStart, ref, stLo, stHi, osHi, vl, bx);
+          renderSnap(Chart, title, ts, te, timeArr, pageSignal, sm, expStart, ref, stLo, stHi, osHi, vl, bx, pageCfg);
 
         const [png1, png2, png3, png4] = await Promise.all([
           S('Respuesta completa ' + pageCfg.label + ' – ' + pageLabel,
@@ -272,7 +273,8 @@
         } else {
           doc.text('/ 100', M + 9, 14.5);
         }
-        let sx = M + 28;
+        // sx: start after score text. Combined label is wider so push further right
+        let sx = isFirstPage && combinedScore != null ? M + 58 : M + 28;
         // For constraint mode first page, show ST/OS/ESS + PERT + CONSTRAINT breakdown
         if (isFirstPage && combinedScore != null && constraintResult) {
           const secLbl = (config as any).secondary_label ?? cfg2?.control_col ?? 'VAR2';
@@ -385,8 +387,8 @@
         // Normal secondary: full chart page
         const signal2 = rows.map(r => r[cfg2.control_col]);
         await renderPage(doc, result2, cfg2, signal2, secondaryLabel2, false);
-      } else if (constraintResult && cfg2) {
-        // Constraint secondary: dedicated constraint page
+      } else if (constraintResult && cfg2 && result2) {
+        // Constraint secondary: page with chart + details panel
         doc.addPage();
         const PW = 297, PH = 210, M = 12;
         const safe = (s: string) => s.replace(/[^\x00-\x7F]/g, ' ').replace(/  +/g, ' ').trim();
@@ -408,30 +410,139 @@
         doc.text('/ 100  CONSTRAINT', M + 9, 14.5);
         doc.setDrawColor(210,210,210); doc.setLineWidth(0.15); doc.line(M, 18, PW - M, 18);
 
-        // Constraint details box
-        const boxY = 24;
-        doc.setFont('courier', 'bold'); doc.setFontSize(7); doc.setTextColor(100, 100, 100);
-        doc.text('CRITERIO', M, boxY);
-        doc.text('DETALLE', M + 40, boxY);
-        doc.text('NOTA', PW - M - 15, boxY);
+        // Layout: chart left (wide), details panel right (narrow)
+        const chartTop = 20, chartH = PH - chartTop - 20;
+        const chartW = 175, panelX = M + chartW + 4, panelW = PW - panelX - M;
+
+        // Render full signal chart with ±limit bands
+        const signal2 = rows.map((r: any) => r[cfg2.control_col]);
+        const timeArr2 = rows.map((r: any) => r[cfg2.time_col]);
+        const sm2 = result2.smoothed as number[];
+        const expStart2 = cfg2.experiment_start ?? 0;
+        const lim = constraintResult.constraint_limit;
+        const lim0 = constraintResult.constraint_zero;
+
+        // Build chart manually for constraint (±limit lines instead of normal bands)
+        const CW2 = 1400, CH2 = 900, SF2 = CW2 / 800;
+        const cvs2 = new OffscreenCanvas(CW2, CH2);
+        const ctx2 = cvs2.getContext('2d') as OffscreenCanvasRenderingContext2D;
+        ctx2.fillStyle = '#ffffff'; ctx2.fillRect(0, 0, CW2, CH2);
+
+        const tArr2 = timeArr2;
+        const si2 = Math.max(0, tArr2.findIndex((t: number) => t >= expStart2));
+        const rawSl2 = signal2.slice(si2);
+        const tSl2   = tArr2.slice(si2);
+        const smOff2 = tArr2.findIndex((t: number) => t >= expStart2);
+        const smSl2  = tSl2.map((_: any, k: number) => {
+          const idx = k;
+          return (idx >= 0 && idx < sm2.length) ? sm2[idx] : null;
+        });
+
+        const overlay2 = {
+          id: 'overlay2',
+          beforeDraw(ch: any) {
+            const c = ch.ctx;
+            c.save(); c.fillStyle = '#ffffff'; c.fillRect(0, 0, ch.width, ch.height); c.restore();
+          },
+          afterDraw(ch: any) {
+            const { ctx: c, scales: { x, y } } = ch;
+            c.save();
+            // Danger zones: above +lim and below -lim
+            const yLimHi = y.getPixelForValue(lim);
+            const yLimLo = y.getPixelForValue(-lim);
+            const yTop   = ch.chartArea.top;
+            const yBot   = ch.chartArea.bottom;
+            c.fillStyle = 'rgba(220,38,38,0.10)';
+            c.fillRect(x.left, yTop, x.right - x.left, yLimHi - yTop);
+            c.fillRect(x.left, yLimLo, x.right - x.left, yBot - yLimLo);
+            // ±limit lines
+            [[lim, '+' + lim.toFixed(4)], [-lim, '-' + lim.toFixed(4)]].forEach(([v, lbl]) => {
+              const py = y.getPixelForValue(v as number);
+              c.strokeStyle = 'rgba(220,38,38,0.80)'; c.lineWidth = 1.8 * SF2;
+              c.setLineDash([9 * SF2, 5 * SF2]);
+              c.beginPath(); c.moveTo(x.left, py); c.lineTo(x.right, py); c.stroke();
+              c.setLineDash([]);
+              c.fillStyle = 'rgba(220,38,38,0.85)';
+              c.font = 'bold ' + Math.round(11 * SF2) + 'px monospace';
+              c.fillText(lbl as string, x.left + 4 * SF2, py - 4 * SF2);
+            });
+            // zero line
+            const py0 = y.getPixelForValue(0);
+            c.strokeStyle = 'rgba(100,100,100,0.4)'; c.lineWidth = SF2;
+            c.setLineDash([4 * SF2, 6 * SF2]);
+            c.beginPath(); c.moveTo(x.left, py0); c.lineTo(x.right, py0); c.stroke();
+            c.setLineDash([]);
+            // pert line
+            const pxPert = x.getPixelForValue(config.perturbation_start);
+            if (pxPert >= x.left && pxPert <= x.right) {
+              c.strokeStyle = 'rgba(109,79,194,0.7)'; c.lineWidth = 1.8 * SF2;
+              c.setLineDash([4 * SF2, 4 * SF2]);
+              c.beginPath(); c.moveTo(pxPert, ch.chartArea.top); c.lineTo(pxPert, ch.chartArea.bottom); c.stroke();
+              c.setLineDash([]);
+              c.fillStyle = 'rgba(109,79,194,0.85)';
+              c.font = 'bold ' + Math.round(13 * SF2) + 'px monospace';
+              c.fillText('PERT', pxPert + 4 * SF2, ch.chartArea.top + 16 * SF2);
+            }
+            c.restore();
+          }
+        };
+
+        const fs2 = Math.round(10 * SF2);
+        const ch2 = new Chart(cvs2 as unknown as HTMLCanvasElement, {
+          type: 'line',
+          data: {
+            labels: tSl2,
+            datasets: [
+              { label: cfg2.control_col, data: rawSl2, borderColor: 'rgba(130,60,200,0.30)', borderWidth: 1.5 * SF2, pointRadius: 0, tension: 0 },
+              { label: 'sm', data: smSl2, borderColor: 'rgba(120,20,100,0.85)', borderWidth: 2.5 * SF2, pointRadius: 0, tension: 0 },
+            ]
+          },
+          options: {
+            animation: false, responsive: false,
+            layout: { padding: { top: 6, right: 10, bottom: 4, left: 4 } },
+            plugins: {
+              legend: { display: false },
+              title: { display: true, text: 'Señal ' + secondaryLabel2 + ' — restricción ±' + lim.toFixed(4), color: '#1a1a1a', font: { family: 'Courier New', size: Math.round(14 * SF2), weight: 'bold' as const }, padding: { bottom: 6 } },
+            },
+            scales: {
+              x: { type: 'linear', ticks: { font: { family: 'Courier New', size: fs2 }, color: '#444', maxTicksLimit: 10, maxRotation: 0 }, grid: { color: 'rgba(0,0,0,0.06)' }, border: { color: 'rgba(0,0,0,0.15)' }, title: { display: true, text: 'Tiempo (s)', font: { family: 'Courier New', size: fs2 }, color: '#333' } },
+              y: { ticks: { font: { family: 'Courier New', size: fs2 }, color: '#444' }, grid: { color: 'rgba(0,0,0,0.06)' }, border: { color: 'rgba(0,0,0,0.15)' }, title: { display: true, text: cfg2.control_col, font: { family: 'Courier New', size: fs2 }, color: '#333' }, ...(cfg2.y_limits ? { min: cfg2.y_limits[0], max: cfg2.y_limits[1] } : {}) }
+            }
+          },
+          plugins: [overlay2],
+        });
+        ch2.draw();
+        const blob2 = await (cvs2 as OffscreenCanvas).convertToBlob({ type: 'image/jpeg', quality: 1.0 });
+        const pngConstraint = await new Promise<string>(res => {
+          const r = new FileReader(); r.onload = () => res(r.result as string); r.readAsDataURL(blob2);
+        });
+        ch2.destroy();
+
+        doc.addImage(pngConstraint, 'JPEG', M, chartTop, chartW, chartH);
         doc.setDrawColor(210,210,210); doc.setLineWidth(0.12);
-        doc.line(M, boxY + 2, PW - M, boxY + 2);
+        doc.rect(M, chartTop, chartW, chartH);
 
-        doc.setFont('courier', 'normal'); doc.setFontSize(6.5); doc.setTextColor(60, 60, 60);
-        const detail = [
-          'max|' + secondaryLabel2 + '| = ' + constraintResult.max_abs_val.toFixed(5),
-          'lim_100 = ' + constraintResult.constraint_limit.toFixed(5),
-          'lim_0   = ' + constraintResult.constraint_zero.toFixed(5),
-        ].join('   ');
-        doc.text('MAX ABSOLUTO', M, boxY + 9);
-        doc.text(detail, M + 40, boxY + 9);
-        doc.setTextColor(...csRgb); doc.setFont('courier', 'bold');
-        doc.text(cs.toFixed(1), PW - M - 15, boxY + 9);
+        // Right panel: score + details
+        let py = chartTop + 4;
+        doc.setFont('courier', 'bold'); doc.setFontSize(6); doc.setTextColor(130, 130, 130);
+        doc.text('NOTA CONSTRAINT', panelX, py); py += 6;
+        doc.setFont('courier', 'bold'); doc.setFontSize(14); doc.setTextColor(...csRgb);
+        doc.text(cs.toFixed(1) + ' / 100', panelX, py); py += 7;
 
-        // Comment
-        doc.setDrawColor(210,210,210); doc.line(M, boxY + 13, PW - M, boxY + 13);
-        doc.setFont('courier', 'normal'); doc.setFontSize(6); doc.setTextColor(100,100,100);
-        doc.text('> ' + safe(constraintResult.comment), M, boxY + 18, { maxWidth: PW - M * 2 });
+        doc.setDrawColor(210,210,210); doc.setLineWidth(0.12); doc.line(panelX, py, panelX + panelW, py); py += 4;
+
+        doc.setFont('courier', 'bold'); doc.setFontSize(6); doc.setTextColor(100, 100, 100);
+        doc.text('MAX ABSOLUTO', panelX, py); py += 4;
+        doc.setFont('courier', 'normal'); doc.setFontSize(6); doc.setTextColor(60, 60, 60);
+        doc.text('max|' + secondaryLabel2 + '| = ' + constraintResult.max_abs_val.toFixed(5), panelX, py); py += 3.5;
+        doc.text('lim 100  = ' + lim.toFixed(5), panelX, py); py += 3.5;
+        doc.text('lim 0    = ' + lim0.toFixed(5), panelX, py); py += 5;
+
+        doc.setDrawColor(210,210,210); doc.line(panelX, py, panelX + panelW, py); py += 4;
+        doc.setFont('courier', 'bold'); doc.setFontSize(6); doc.setTextColor(100, 100, 100);
+        doc.text('OBSERVACIÓN', panelX, py); py += 4;
+        doc.setFont('courier', 'normal'); doc.setFontSize(5.5); doc.setTextColor(80, 80, 80);
+        doc.text('> ' + safe(constraintResult.comment), panelX, py, { maxWidth: panelW });
 
         // Footer
         doc.setTextColor(150,150,150); doc.setFontSize(5.5);
