@@ -381,7 +381,7 @@
 
       await renderPage(doc, result, config, primarySignal, primaryLabel, true);
 
-      if (result2 && cfg2) {
+      if (result2 && cfg2 && !constraintResult) {
         // Normal secondary: full chart page
         const signal2 = rows.map(r => r[cfg2.control_col]);
         await renderPage(doc, result2, cfg2, signal2, secondaryLabel2, false);
